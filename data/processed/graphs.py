@@ -3,34 +3,45 @@ import matplotlib.pyplot as plt
 import os
 
 file_path = os.path.join("data", "raw", "csv-data")
-output_path = os.path.join("images", "seizure_distributions")
+output_path = os.path.join("images", "seizure_timelines")
 os.makedirs(output_path, exist_ok=True)
+
+sampling_rate = 100  # Frecuencia de muestreo en Hz (100 muestras por segundo)
 
 # Recorrer todos los subdirectorios y archivos CSV
 for root, dirs, files in os.walk(file_path):
     for file in files:
-        if file.endswith(".csv"):
+        if file.endswith("clipped.csv"):
             full_csv_path = os.path.join(root, file)
             try:
                 df = pd.read_csv(full_csv_path)
 
-                # Solo si la columna 'Seizure' está presente
                 if "Seizure" in df.columns:
-                    plt.figure(figsize=(6, 4))
-                    df["Seizure"].value_counts().plot(kind="bar", color=["blue", "red"])
-                    plt.xticks(ticks=[0, 1], labels=["No Seizure (0)", "Seizure (1)"])
-                    plt.xlabel("Seizure")
-                    plt.ylabel("Count")
-                    plt.title(f"Distribución de Seizures - {file}")
+                    # Crear columna de tiempo en minutos basado en índices y frecuencia
+                    df["Time (min)"] = df.index / (sampling_rate * 60)
 
-                    # Nombre de imagen con ruta relativa a su carpeta
-                    image_name = f"{file.replace('.csv', '')}_seizure_distribution.png"
+                    plt.figure(figsize=(12, 6))
+                    plt.plot(df["Time (min)"], df["Seizure"], drawstyle='steps-post', color="red", linewidth=1)
+                    plt.xlabel("Tiempo (minutos)")
+                    plt.ylabel("Seizure (0 o 1)")
+                    plt.title(f"Seizure Timeline - {file}")
+                    plt.ylim(-0.1, 1.1)
+                    plt.grid(True)
+
+                    # Guardar imagen
+                    image_name = f"{file.replace('.csv', '')}_timeline.png"
                     save_path = os.path.join(output_path, image_name)
                     plt.savefig(save_path)
                     plt.close()
-                    print(f"Guardado: {save_path}")
+
+                    # Imprimir duración total
+                    total_minutes = len(df) / (sampling_rate * 60)
+                    print(f"Guardado: {save_path} - Duración: {total_minutes:.2f} minutos")
+
                 else:
                     print(f"Advertencia: 'Seizure' no está en {file}")
             except Exception as e:
                 print(f"Error procesando {file}: {e}")
+
+
 
