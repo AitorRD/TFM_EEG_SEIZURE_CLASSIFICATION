@@ -1,3 +1,4 @@
 /data/raw/*
 .vscode/
-/images/seizure_distributions/*
+/images/seizure_timelines/*
+/data/processed/dataset_clipped.csv
