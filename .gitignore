@@ -2,3 +2,4 @@
 .vscode/
 /images/seizure_timelines/*
 /data/processed/dataset_clipped.csv
+/data/processed/dataset_clipped.zip
