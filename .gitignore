@@ -3,3 +3,5 @@
 /images/seizure_timelines/*
 /data/processed/dataset_clipped.csv
 /data/processed/dataset_clipped.zip
+/data/processed/dataset_windowed.csv
+/data/processed/stats.py

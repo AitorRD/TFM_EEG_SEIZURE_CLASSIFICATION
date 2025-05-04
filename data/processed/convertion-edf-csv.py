@@ -136,13 +136,15 @@ for patient_folder in tqdm.tqdm(os.listdir(file_path_read), desc="Procesando pac
             try:
                 raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
                 print(f"Duración del archivo EDF: {raw.times[-1]} segundos")
-                raw.filter(1, 70, method='iir')  # Filtro paso banda
-                raw.notch_filter(60, method='iir')  # Filtro notch
+                lista_canales = [ch for ch in raw.ch_names if "EEG" in ch.upper()]
+                raw.pick(lista_canales)
+                #raw.filter(0.5, 70, method='iir')  # Filtro paso banda
+                #raw.notch_filter(60, method='iir')  # Filtro notch
                 raw.resample(100)  # Remuestreo a 100 Hz
-                ica = ICA(n_components=35, method='fastica', random_state=0, max_iter=500)
-                ica.fit(raw)
-                raw = ica.apply(raw)
-                print("ICA de MNE aplicado correctamente.")
+                #ica = ICA(n_components=len(raw.ch_names), method='fastica', random_state=0, max_iter=500) #Filtro ICA con fastica
+                #ica.fit(raw)
+                #raw = ica.apply(raw)
+                #print("ICA de MNE aplicado correctamente.")
                 data, times = raw.get_data(return_times=True)
                 df = pd.DataFrame(data.T, columns=raw.ch_names)
                 df.insert(0, "Time (s)", times)
@@ -161,6 +163,7 @@ for patient_folder in tqdm.tqdm(os.listdir(file_path_read), desc="Procesando pac
                     df = clipping(df, freq_hz=100, minutes=30)
                 else:
                     print("No se aplica clipping por duración insuficiente.")
+                df.fillna(0, inplace=True)
                 df.to_csv(csv_path, index=False)
 
                 print(f"Saved: {csv_path}")
