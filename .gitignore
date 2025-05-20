@@ -4,4 +4,16 @@
 /data/processed/dataset_clipped.csv
 /data/processed/dataset_clipped.zip
 /data/processed/dataset_windowed.csv
+/data/processed/dataset_with_labels.csv
 /data/processed/stats.py
+/data/processed/dataset_windowed_train.csv
+/data/processed/dataset_windowed_test.csv
+/data/processed/dataset_windowed_val.csv
+/data/processed/features_with_labels.csv
+/data/processed/features_train.csv
+/data/processed/features_test.csv
+/data/processed/features_val.csv
+/data/processed/labels_train.csv
+/data/processed/labels_test.csv
+/data/processed/labels_val.csv
+/data/processed/selected_features.csv
