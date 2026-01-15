@@ -1,41 +1,54 @@
-import pandas as pd
 import os
+import pandas as pd
+from tqdm import tqdm
+import time
 
-from sklearn.model_selection import train_test_split
-
-def window_data(df, window_size=2000, overlap=0.25, id_col='idSession'): #En la primera convulsion dura una 7000 filas
+# Función de ventanado por sesión
+def window_and_save(df, set_name, window_size=200, overlap=0.50, out_dir='data/processed/windowed'):
+    os.makedirs(out_dir, exist_ok=True)
     step = int(window_size * (1 - overlap))
-    windows = []
-
-    print(f"Ventana: {window_size} | Overlap: {overlap} | Paso: {step}")
-    for session_id, session_df in df.groupby(id_col):
-        print(f"\nProcesando sesión: {session_id} (filas: {len(session_df)})")
-        session_df = session_df.reset_index(drop=True)
+    all_windows = []
+    sessions = df['idSession'].unique()
+    
+    print(f"\n[{set_name.upper()}] Ventanando {len(sessions)} sesiones...")
+    for session_id in tqdm(sessions, desc=f"{set_name.upper()} sessions"):
+        session_df = df[df['idSession'] == session_id].reset_index(drop=True)
         max_start = len(session_df) - window_size
-        for i, start in enumerate(range(0, max_start + 1, step)):
+        for start in range(0, max_start + 1, step):
             window = session_df.iloc[start:start+window_size].copy()
             window['window_id'] = f"{session_id}_{start}"
-            window['idSession'] = session_id
-            windows.append(window)
-            if i < 2:
-                print(f" - Ventana {i+1}: filas {start} a {start+window_size}")
+            all_windows.append(window)
     
-    return pd.concat(windows).reset_index(drop=True)
+    if all_windows:
+        result = pd.concat(all_windows, ignore_index=True)
+        result.to_csv(os.path.join(out_dir, f"dataset_windowed_{set_name}.csv"), index=False)
+        print(f"[{set_name.upper()}] Guardado: {len(result)} filas")
 
-file_path_read = os.path.join("data", "processed", "dataset_clipped.csv")
-path_saved_train = os.path.join("data", "processed", "dataset_windowed_train.csv")
-path_saved_val = os.path.join("data", "processed", "dataset_windowed_val.csv")
-path_saved_test = os.path.join("data", "processed", "dataset_windowed_test.csv")
-df = pd.read_csv(file_path_read)
-df_windowed = window_data(df, window_size=3000, overlap=0.25)
-unique_sessions = df_windowed['idSession'].unique()
-train_ids, temp_ids = train_test_split(unique_sessions, test_size=0.2, random_state=42)
-val_ids, test_ids = train_test_split(temp_ids, test_size=0.5, random_state=42)
+# Rutas de entrada
+input_dir = os.path.join("data", "processed", "dataset_clipped")
+train_file = os.path.join(input_dir, "train.csv")
+val_file = os.path.join(input_dir, "val.csv")
+test_file = os.path.join(input_dir, "test.csv")
 
-train_df = df_windowed[df_windowed['idSession'].isin(train_ids)]
-val_df = df_windowed[df_windowed['idSession'].isin(val_ids)]
-test_df = df_windowed[df_windowed['idSession'].isin(test_ids)]
+# Parámetros de ventanado
+sampling_rate = 100
+window_seconds = 10
+window_size = sampling_rate * window_seconds
+overlap = 0.25
 
-train_df.to_csv(path_saved_train, index=False)
-val_df.to_csv(path_saved_val, index=False)
-test_df.to_csv(path_saved_test, index=False)
+# Temporizador
+start_time = time.time()
+
+# Leer datasets y aplicar ventanado
+datasets = {
+    "train": pd.read_csv(train_file),
+    "val": pd.read_csv(val_file),
+    "test": pd.read_csv(test_file),
+}
+
+for set_name, df in datasets.items():
+    window_and_save(df, set_name, window_size=window_size, overlap=overlap)
+
+elapsed = time.time() - start_time
+print(f"\n Ventanado completado en {elapsed:.2f} segundos.")
+

@@ -20,3 +20,5 @@
 /data/processed/sessions/*
 /data/processed/holdout/*
 /data/processed/folds/*
+/data/processed/windowed/*
+/data/processed/dataset_clipped/*

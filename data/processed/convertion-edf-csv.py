@@ -138,13 +138,13 @@ for patient_folder in tqdm.tqdm(os.listdir(file_path_read), desc="Procesando pac
                 print(f"Duración del archivo EDF: {raw.times[-1]} segundos")
                 lista_canales = [ch for ch in raw.ch_names if "EEG" in ch.upper()]
                 raw.pick(lista_canales)
-                #raw.filter(0.5, 70, method='iir')  # Filtro paso banda
-                #raw.notch_filter(60, method='iir')  # Filtro notch
-                raw.resample(100)  # Remuestreo a 100 Hz
-                #ica = ICA(n_components=len(raw.ch_names), method='fastica', random_state=0, max_iter=500) #Filtro ICA con fastica
-                #ica.fit(raw)
-                #raw = ica.apply(raw)
-                #print("ICA de MNE aplicado correctamente.")
+                raw.filter(0.5, 70, method='iir')  # Filtro paso banda
+                raw.notch_filter(60, method='iir')  # Filtro notch
+                ica = ICA(n_components=len(raw.ch_names), method='fastica', random_state=0, max_iter=500) #Filtro ICA con fastica
+                ica.fit(raw)
+                raw = ica.apply(raw)
+                print("ICA de MNE aplicado correctamente.")
+                raw.resample(100)
                 data, times = raw.get_data(return_times=True)
                 df = pd.DataFrame(data.T, columns=raw.ch_names)
                 df.insert(0, "Time (s)", times)

@@ -1,266 +1,449 @@
+import pandas as pd
+import numpy as np
 import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
-import numpy as np
-import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
-from lime import lime_tabular
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from sklearn.utils.class_weight import compute_class_weight
 import shap
-import random
-random.seed(42)
-np.random.seed(42)
-torch.manual_seed(42)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
-# -- Carga y preparación de datos --
-file_path_train = os.path.join("data", "processed", "dataset_windowed_train.csv")
-file_path_val = os.path.join("data", "processed", "dataset_windowed_val.csv")
-file_path_test = os.path.join("data", "processed", "dataset_windowed_test.csv")
+import lime
+import lime.lime_tabular
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tqdm import tqdm
 
-channels = ['EEG Fp1','EEG Fp2','EEG F7','EEG F3','EEG Fz','EEG F4','EEG F8',
-            'EEG T3','EEG C3','EEG Cz','EEG C4','EEG T4','EEG T5','EEG P3','EEG Pz',
-            'EEG P4','EEG T6','EEG O1','EEG O2']
+# --- Configuración de rutas ---
+# Asegúrate de que estas rutas coincidan con la ubicación de tus archivos tsfresh
+FEATURES_TRAIN_CSV = "data/processed/features_train.csv"
+LABELS_TRAIN_CSV = "data/processed/labels_train.csv"
+FEATURES_TEST_CSV = "data/processed/features_test.csv"
+LABELS_TEST_CSV = "data/processed/labels_test.csv"
 
-def load_and_prepare(csv_path):
-    df = pd.read_csv(csv_path)
-    print(f"[DEBUG] Cargando {csv_path} - shape original: {df.shape}")
-    grouped = df.groupby('window_id')
-    
-    X_windows = []
-    y_windows = []
-    
-    for window_id, group in grouped:
-        data_window = group[channels].to_numpy().T  # (channels, tiempo)
-        label = group['Seizure'].mode()[0]
-        X_windows.append(data_window)
-        y_windows.append(label)
-    
-    X = np.array(X_windows)
-    y = np.array(y_windows)
-    print(f"[DEBUG] Ventanas: {X.shape[0]}, Canales: {X.shape[1]}, Tiempo: {X.shape[2]}")
-    print(f"[DEBUG] Etiquetas únicas: {np.unique(y)}")
-    return X, y
+# Directorios de salida para los gráficos XAI y métricas
+XAI_OUTPUT_DIR = "images/xai/"  # Subdirectorio específico para XAI de RNN
+os.makedirs(XAI_OUTPUT_DIR, exist_ok=True)
+METRICS_OUTPUT_DIR = "images/results/" # Directorio para métricas generales
+os.makedirs(METRICS_OUTPUT_DIR, exist_ok=True)
 
-X_train, y_train = load_and_prepare(file_path_train)
-X_val, y_val = load_and_prepare(file_path_val)
-X_test, y_test = load_and_prepare(file_path_test)
-df_train = pd.read_csv('data/processed/dataset_windowed_train.csv')
-train_labels = y_train
 
-X_train = (X_train - X_train.mean(axis=2, keepdims=True)) / (X_train.std(axis=2, keepdims=True) + 1e-8)
-X_val = (X_val - X_val.mean(axis=2, keepdims=True)) / (X_val.std(axis=2, keepdims=True) + 1e-8)
-X_test = (X_test - X_test.mean(axis=2, keepdims=True)) / (X_test.std(axis=2, keepdims=True) + 1e-8)
-
-# Dataset personalizado
-class EEGDataset(Dataset):
-    def __init__(self, X_windows, y_windows):
-        self.X = torch.tensor(X_windows, dtype=torch.float32)
-        self.y = torch.tensor(y_windows, dtype=torch.long)
-        print(f"[DEBUG][Dataset] X shape: {self.X.shape}, y shape: {self.y.shape}")
+# --- 1. Definición del Modelo RNN Simple ---
+class RNNClassifier(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, num_classes=2):
+        """
+        Clasificador RNN simple para datos tabulares.
+        input_size: En nuestro caso, será 1, ya que cada característica de tsfresh es un "paso de tiempo".
+        hidden_size: Número de características en el estado oculto.
+        num_layers: Número de capas recurrentes.
+        num_classes: Número de clases de salida.
+        """
+        super(RNNClassifier, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
         
-    def __len__(self):
-        return len(self.y)
-    
-    def __getitem__(self, idx):
-        x = self.X[idx].unsqueeze(0)  # (1, canales, tiempo)
-        y = self.y[idx]
-        return x, y
-
-train_dataset = EEGDataset(X_train, y_train)
-val_dataset = EEGDataset(X_val, y_val)
-test_dataset = EEGDataset(X_test, y_test)
-
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=32)
-test_loader = DataLoader(test_dataset, batch_size=32)
-
-class EEGRNN(nn.Module):
-    def __init__(self, num_channels, time_points, num_classes, hidden_size=64, num_layers=1):
-        super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=num_channels,   # features (canales)
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True
-        )
+        # nn.RNN: (input_size, hidden_size, num_layers, batch_first=True)
+        # batch_first=True indica que el tensor de entrada/salida es (batch_size, seq_len, feature_size)
+        self.rnn = nn.RNN(input_size, hidden_size, num_layers, batch_first=True)
+        
+        # Capa completamente conectada para clasificar el estado oculto final
         self.fc = nn.Linear(hidden_size, num_classes)
 
     def forward(self, x):
-        # x: (batch, 1, channels, time) → necesitamos (batch, time, channels)
-        x = x.squeeze(1).permute(0, 2, 1)  # ahora (batch, time, channels)
-        output, (hn, cn) = self.lstm(x)    # output: (batch, time, hidden)
-        out = self.fc(hn[-1])              # usamos la última capa oculta
+        """
+        Paso hacia adelante de la RNN.
+        x: Tensor de entrada con forma (batch_size, num_features_tsfresh).
+           Será remodelado a (batch_size, num_features_tsfresh, 1) para la RNN.
+        """
+        # x.shape: (batch_size, num_features_tsfresh)
+        # Necesitamos remodelar a (batch_size, seq_len, input_size)
+        # Aquí, seq_len = num_features_tsfresh, input_size = 1
+        x = x.unsqueeze(2) # Transforma (batch_size, N) a (batch_size, N, 1)
+
+        # Inicializar el estado oculto con ceros
+        # h0.shape: (num_layers, batch_size, hidden_size)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        
+        # Propagar la RNN
+        # out: Salidas de cada paso de tiempo: (batch_size, seq_len, hidden_size)
+        # h_n: Estado oculto final para cada capa: (num_layers, batch_size, hidden_size)
+        out, h_n = self.rnn(x, h0)
+        
+        # Para la clasificación, usamos el estado oculto de la última capa (h_n[-1])
+        # h_n[-1, :, :] tiene forma (batch_size, hidden_size)
+        out = self.fc(h_n[-1, :, :])
         return out
-    
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = EEGRNN(num_channels=19, time_points=X_train.shape[2], num_classes=2).to(device)
-labels = train_labels
-class_weights = compute_class_weight('balanced', classes=np.array([0, 1]), y=labels)
-class_weights[1] *= 2
-class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
-criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-def train(model, dataloader, criterion, optimizer, device):
+# --- 2. Preparación de Datos (Dataset y DataLoader) ---
+class EEGFeaturesDataset(Dataset):
+    def __init__(self, X, y):
+        """
+        Conjunto de datos para las características de EEG.
+        X: DataFrame de Pandas con las características.
+        y: Serie de Pandas con las etiquetas.
+        """
+        self.X = torch.tensor(X.values, dtype=torch.float32)
+        self.y = torch.tensor(y.values, dtype=torch.long)
+
+    def __len__(self):
+        """Devuelve el número total de muestras."""
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        """Devuelve una muestra y su etiqueta en el índice dado."""
+        return self.X[idx], self.y[idx]
+
+# --- 3. Función para Entrenar y Evaluar el RNN ---
+def train_and_evaluate_rnn(X_train, y_train, X_test, y_test,
+                           learning_rate=0.001, num_epochs=50, batch_size=64,
+                           hidden_size=64, num_layers=1, random_state=42):
+    """
+    Entrena y evalúa un modelo RNN.
+    """
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Usando dispositivo para RNN: {device}")
+
+    # Configurar semilla para reproducibilidad
+    torch.manual_seed(random_state)
+    np.random.seed(random_state)
+
+    # Escalado de características (Importante para redes neuronales)
+    scaler = StandardScaler()
+    X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns)
+    X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns)
+
+    # Preparar DataLoaders
+    train_dataset = EEGFeaturesDataset(X_train_scaled, y_train)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+    test_dataset = EEGFeaturesDataset(X_test_scaled, y_test)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    # Inicializar el modelo RNN
+    # input_size es 1 porque cada característica de tsfresh es un "paso de tiempo"
+    model = RNNClassifier(input_size=1, hidden_size=hidden_size, num_layers=num_layers).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Calcular pesos de clase para manejar desbalance de clases
+    class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(y_train), y=y_train)
+    weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+    criterion = nn.CrossEntropyLoss(weight=weights_tensor)
+    # Entrenamiento
+    print("\n--- Entrenando RNN ---")
     model.train()
-    total_loss = 0
-    for i, (X_batch, y_batch) in enumerate(dataloader):
-        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-        optimizer.zero_grad()
-        outputs = model(X_batch)
-        loss = criterion(outputs, y_batch)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-        if i % 10 == 0:
-            print(f"[DEBUG][Train] Batch {i}, Loss: {loss.item():.4f}")
-    return total_loss / len(dataloader)
+    for epoch in range(num_epochs):
+        total_loss = 0
+        for batch_X, batch_y in tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}"):
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
 
-def evaluate(model, dataloader, device):
+            optimizer.zero_grad()
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        # Puedes descomentar la siguiente línea para ver el progreso de la pérdida por época
+        # print(f"Epoch {epoch+1}, Loss: {total_loss / len(train_dataloader):.4f}")
+
+    # Evaluación
+    print("\n--- Evaluando RNN ---")
     model.eval()
-    preds = []
-    trues = []
+    all_preds = []
+    all_probs = []
     with torch.no_grad():
-        for i, (X_batch, y_batch) in enumerate(dataloader):
-            X_batch = X_batch.to(device)
-            outputs = model(X_batch)
-            _, predicted = torch.max(outputs, 1)
-            preds.extend(predicted.cpu().numpy())
-            trues.extend(y_batch.numpy())
-            if i % 10 == 0:
-                print(f"[DEBUG][Eval] Batch {i}, Pred sample: {predicted[0].item()}, True sample: {y_batch[0].item()}")
-    acc = accuracy_score(trues, preds)
-    prec = precision_score(trues, preds,average='weighted', zero_division=0)
-    rec = recall_score(trues, preds,average='weighted', zero_division=0)
-    f1 = f1_score(trues, preds,average='weighted',  zero_division=0)
-    print(f"[DEBUG][Eval] Acc: {acc:.4f}, Prec: {prec:.4f}, Rec: {rec:.4f}, F1: {f1:.4f}")
-    return acc, prec, rec, f1, preds, trues
+        for batch_X, _ in test_dataloader:
+            batch_X = batch_X.to(device)
+            outputs = model(batch_X)
+            probs = F.softmax(outputs, dim=1) # Probabilidades para XAI
+            _, predicted = torch.max(outputs.data, 1) # Clases predichas
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
 
-# Entrenamiento con debug
-history = {"acc": [], "prec": [], "rec": [], "f1": [], "loss": []}
-
-for epoch in range(5): #<-------------------------------------------- EPOCAS !!!!!!!
+    # Calcular métricas
+    accuracy = accuracy_score(y_test, all_preds)
+    precision = precision_score(y_test, all_preds)
+    recall = recall_score(y_test, all_preds)
+    f1 = f1_score(y_test, all_preds)
+    f1_micro = f1_score(y_test, all_preds, average='micro')
+    f1_macro = f1_score(y_test, all_preds, average='macro')
+    roc_auc = roc_auc_score(y_test, np.array(all_probs)[:, 1])
+    metrics = {
+        'Accuracy': accuracy,
+        'Precision': precision,
+        'Recall': recall,
+        'F1 Score': f1,
+        'F1 Macro': f1_macro,
+        'F1 Micro': f1_micro,
+        'AUC': roc_auc
+    }
+    print("\nMétricas del RNN en Test:")
+    for metric, value in metrics.items():
+        print(f" - {metric}: {value:.4f}")
     
-    print(f"\n[INFO] Epoch {epoch+1}")
-    train_loss = train(model, train_loader, criterion, optimizer, device)
-    val_acc, val_prec, val_rec, val_f1, preds, trues = evaluate(model, val_loader, device)
-    print(f"Epoch {epoch+1} - Loss: {train_loss:.4f} - Val Acc: {val_acc:.4f} - Val F1: {val_f1:.4f}")
-    history["loss"].append(train_loss)
-    history["acc"].append(val_acc)
-    history["prec"].append(val_prec)
-    history["rec"].append(val_rec)
-    history["f1"].append(val_f1)
-    print("Distribución real:", np.bincount(trues))
-    print("Distribución predicha:", np.bincount(preds))
-    print(classification_report(trues, preds, target_names=['No Seizure', 'Seizure']))
-metrics_df = pd.DataFrame(history)
-metrics_df.index = [f"Epoch {i+1}" for i in range(len(metrics_df))]
-print("\nTabla de métricas por época:")
-print(metrics_df)
+    return model, scaler, X_test_scaled, y_test, metrics
+
+# --- 4. Funciones para XAI (SHAP y LIME) ---
+
+def generate_xai_barplots_rnn(model, scaler, X_test_scaled, X_train_scaled, feature_names, save_dir, top_n=10):
+    
+    device = next(model.parameters()).device 
+
+    # SHAP (KernelExplainer)
+    try:
+        # Usar una muestra más pequeña del conjunto de entrenamiento escalado como fondo para SHAP
+        background_data_for_shap = X_train_scaled.values[:min(50, len(X_train_scaled))] # Convertir a numpy
+        
+        # Wrap the model's predict_proba for SHAP
+        def model_predict_proba_for_shap(x):
+            # Asegurar que la entrada x sea 2D (batch_size, num_features) para el modelo
+            if x.ndim == 1:
+                x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0).to(device) 
+            else: 
+                x_tensor = torch.tensor(x, dtype=torch.float32).to(device) 
+            
+            with torch.no_grad():
+                model.eval()
+                outputs = model(x_tensor)
+                
+                if torch.isnan(outputs).any() or torch.isinf(outputs).any():
+                    print(f"[WARN] NaN o Inf detectado en las salidas del modelo antes de softmax para SHAP. Outputs: {outputs.cpu().numpy().flatten()[:5]}...")
+                    outputs = torch.where(torch.isnan(outputs), torch.tensor(0.0).to(device), outputs)
+                    outputs = torch.where(torch.isinf(outputs), torch.tensor(1e-6).to(device), outputs)
+                    
+                probabilities = F.softmax(outputs, dim=1)
+                
+                epsilon = 1e-8
+                probabilities = torch.clamp(probabilities, epsilon, 1 - epsilon)
+
+                return probabilities.cpu().numpy()
+
+        explainer_shap = shap.KernelExplainer(model_predict_proba_for_shap, background_data_for_shap)
+        
+        test_sample_for_shap = X_test_scaled.values[:min(100, len(X_test_scaled))]
+
+        print("Cálculo de valores SHAP completado.")
+        shap_values_raw = explainer_shap.shap_values(test_sample_for_shap)
+        if isinstance(shap_values_raw, list) and len(shap_values_raw) == 2:
+            shap_values_for_plotting = shap_values_raw[1] # Select SHAP values for class 1 (Seizure)
+        else:
+            shap_values_for_plotting = shap_values_raw 
+
+        # --- NUEVA CORRECCIÓN PARA SHAP ---
+        # Reshape shap_values_for_plotting para que sea 2D (num_samples, num_total_features)
+        # Esto es crucial si SHAP lo devuelve como (samples, sub_dimension_1, sub_dimension_2)
+        # Aseguramos que la última dimensión de feature_names coincida con la segunda dimensión de shap_values_for_plotting
+        target_num_features = len(feature_names)
+        current_shape = shap_values_for_plotting.shape
+
+        # If it's 3D and the total number of elements matches expected features * samples
+        if shap_values_for_plotting.ndim == 3:
+        # Assumes the structure is (samples, time_points, channels_or_some_other_dim)
+        # And you want to flatten these into a single dimension per sample
+        # The total number of features after flattening should be len(feature_names)
+
+        # First, check if the total number of features (excluding samples) matches feature_names length
+            if np.prod(current_shape[1:]) == target_num_features:
+                shap_values_for_plotting = shap_values_for_plotting.reshape(current_shape[0], target_num_features)
+                print(f"SHAP values reshaped from {current_shape} to {shap_values_for_plotting.shape}")
+            else:
+                if not isinstance(shap_values_raw, list) and shap_values_raw.ndim == 3 and shap_values_raw.shape[2] == 2:
+                    shap_values_for_plotting = shap_values_raw[:, :, 1] # Take only the class 1 SHAP values
+                    print(f"Reshaped 3D SHAP values by slicing: {shap_values_for_plotting.shape}")
+                else:
+                    raise ValueError(f"Formato inesperado de shap_values_for_plotting: {shap_values_for_plotting.shape}. Se esperaba 2D (muestras, características) o un 3D (muestras, intermedio, clases) donde la última dimensión sea el número de clases.")
 
 
-# Gráfico comparativo de métricas
-fig, ax = plt.subplots(figsize=(8, 2 + 0.5*len(metrics_df)))
-ax.axis('off')
-tbl = ax.table(cellText=np.round(metrics_df.values, 4),
-               colLabels=metrics_df.columns,
-               rowLabels=metrics_df.index,
-               loc='center',
-               cellLoc='center')
-tbl.auto_set_font_size(False)
-tbl.set_fontsize(10)
-tbl.scale(1.2, 1.2)
-plt.tight_layout()
-plt.savefig("images/results/rnn_metricas_comparativas.png", dpi=300)
-plt.close()
-print("[INFO] Gráfico de métricas guardado en images/results/rnn_metricas_comparativas.png")
-
-# LIME para explicar
-time_points = X_test.shape[2]
-X_test_flat = X_test.reshape(X_test.shape[0], -1)
-
-def predict_fn(x_numpy):
-    x_tensor = torch.tensor(x_numpy.reshape(-1, 1, 19, time_points), dtype=torch.float32).to('cpu')
-    model_cpu = model.to('cpu')
-    model_cpu.eval()
-    with torch.no_grad():
-        outputs = model_cpu(x_tensor)
-        probs = torch.softmax(outputs, dim=1).cpu().numpy()
-    return probs
-
-torch.cuda.empty_cache()
-explainer = lime_tabular.LimeTabularExplainer(
-    X_test_flat,
-    feature_names=[f"C{c}_T{t}" for c in range(19) for t in range(time_points)],
-    class_names=['No Seizure', 'Seizure'],
-    discretize_continuous=False
-)
-
-exp = explainer.explain_instance(
-    X_test_flat[0],
-    predict_fn,
-    num_features=50,
-    top_labels=1
-)
-
-main_label = exp.available_labels()[0]
-feature_importance = dict(exp.as_list(label=main_label))
-lime_series = pd.Series(feature_importance).abs().sort_values(ascending=False)
-lime_importancia = np.zeros(19)
-for i, canal in enumerate(channels):
-    canal_feats = [f"C{i}_T{t}" for t in range(time_points) if f"C{i}_T{t}" in lime_series.index]
-    if canal_feats:
-        lime_importancia[i] = lime_series[canal_feats].mean()
-    else:
-        lime_importancia[i] = 0  # Si no hay features, importancia 0
-lime_canal_series = pd.Series(lime_importancia, index=channels).sort_values(ascending=False)
+        if shap_values_for_plotting.ndim != 2 or shap_values_for_plotting.shape[1] != target_num_features:
+            raise ValueError(f"Después del procesamiento, shap_values_for_plotting debe ser 2D con {target_num_features} características. Shape actual: {shap_values_for_plotting.shape}")
 
 
-plt.figure(figsize=(8, 6))
-print("LIME canal series:\n", lime_canal_series)
-sns.barplot(x=lime_canal_series.values, y=lime_canal_series.index, palette="magma")
-plt.title("Importancia LIME - RNN")
-plt.xlabel("Importancia absoluta")
-plt.tight_layout()
-plt.savefig("images/xai/rnn_lime.png", dpi=300)
-plt.close()
-print("[INFO] Gráfico LIME guardado en images/xai/rnn_lime.png")
-
-# SHAP para explicar
-try:
-    model_cpu = model.to('cpu')
-    model_cpu.train()  # ← Esto es clave para evitar el error de cudnn
-    background = torch.tensor(X_test[:50], dtype=torch.float32).unsqueeze(1)
-    test_sample = torch.tensor(X_test[0:1], dtype=torch.float32).unsqueeze(1)
-
-    explainer = shap.GradientExplainer(model_cpu, background)
-    shap_values = explainer.shap_values(test_sample)
-
-    if isinstance(shap_values, list):
-        shap_values = shap_values[0]
-
-    shap_values = np.array(shap_values)  # (1, 1, 19, tiempo)
-    if shap_values.ndim == 4:
-        shap_values = shap_values[0, 0]  # (19, tiempo)
-        shap_importancia = np.abs(shap_values).mean(axis=1)
-        shap_canal_series = pd.Series(shap_importancia, index=channels).sort_values(ascending=False)
+        avg_abs_shap_importances = np.abs(shap_values_for_plotting).mean(axis=0)
+        
+        shap_series = pd.Series(avg_abs_shap_importances, index=feature_names)
+        shap_series = shap_series.sort_values(ascending=False).head(top_n)
 
         plt.figure(figsize=(8, 6))
-        print("SHAP canal series:\n", shap_canal_series)
-        sns.barplot(x=shap_canal_series.values, y=shap_canal_series.index, palette="viridis")
-        plt.title("Importancia SHAP - RNN")
-        plt.xlabel("Importancia media absoluta")
+        sns.barplot(x=shap_series.values, y=shap_series.index, palette="Greys") 
+        plt.title(f"Importancia SHAP (Promedio Absoluto) - RNN")
+        plt.xlabel("Importancia SHAP media (absoluta)")
+        plt.ylabel("Característica")
         plt.tight_layout()
-        plt.savefig("images/xai/rnn_shap.png", dpi=300)
+        plot_path = os.path.join(save_dir, f"rnn_shap.png")
+        plt.savefig(plot_path, dpi=300)
         plt.close()
-        print("[INFO] Gráfico SHAP guardado en images/xai/rnn_shap.png")
+        print(f"[XAI] Gráfico SHAP guardado en: {plot_path}")
+        
+    except Exception as e:
+        print(f"[ERROR] Fallo al generar gráfico SHAP para RNN: {e}")
+
+    # LIME
+    try:
+        # Wrap the model's predict_proba for LIME
+        def lime_predict_proba(x):
+            if x.ndim == 1:
+                x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0).to(device)
+            else:
+                x_tensor = torch.tensor(x, dtype=torch.float32).to(device)
+
+            with torch.no_grad():
+                model.eval()
+                outputs = model(x_tensor)
+                
+                # --- MODIFICADO: Mensajes de WARN más específicos ---
+                if torch.isnan(outputs).any():
+                    print(f"[WARN] NaN detectado en las salidas del modelo ANTES de softmax para LIME. Outputs: {outputs.cpu().numpy().flatten()[:5]}...") # Mostrar primeros 5 elementos
+                    outputs = torch.where(torch.isnan(outputs), torch.tensor(0.0).to(device), outputs)
+                if torch.isinf(outputs).any():
+                    print(f"[WARN] Inf detectado en las salidas del modelo ANTES de softmax para LIME. Outputs: {outputs.cpu().numpy().flatten()[:5]}...") # Mostrar primeros 5 elementos
+                    outputs = torch.where(torch.isinf(outputs), torch.tensor(1e-6).to(device), outputs)
+                    
+                # Si, después de manejar NaN/Inf, las salidas aún son muy extremas
+                # O si queremos ser ultra-seguros, podemos clippear los logits antes del softmax
+                # outputs = torch.clamp(outputs, min=-10.0, max=10.0) # Esto es un "hard clamp" a los logits. Prueba esto si los errores persisten.
+
+                probabilities = F.softmax(outputs, dim=1)
+                
+                # Asegurar que las probabilidades no sean exactamente 0 o 1
+                epsilon = 1e-8
+                probabilities = torch.clamp(probabilities, epsilon, 1 - epsilon)
+                
+                return probabilities.cpu().numpy()
+
+        explainer_lime = lime.lime_tabular.LimeTabularExplainer(
+            training_data=X_train_scaled.values,
+            feature_names=feature_names.tolist(),
+            class_names=["No Seizure", "Seizure"],
+            mode="classification",
+            discretize_continuous=False
+        )
+        
+        all_lime_importances = []
+        num_lime_samples = min(50, len(X_test_scaled)) # Número de instancias del test set a explicar
+        
+        for idx in tqdm(range(num_lime_samples), desc="Generando explicaciones LIME para RNN"):
+            data_row = X_test_scaled.iloc[idx].values
+            
+            try:
+                # --- AUMENTAR NUM_SAMPLES para explain_instance (NUEVO) ---
+                # Esto le da a LIME más datos para construir su modelo local y puede mejorar la estabilidad.
+                exp = explainer_lime.explain_instance(
+                    data_row,
+                    lime_predict_proba,
+                    num_features=len(feature_names),
+                    top_labels=1,
+                    num_samples=5000 # Aumentado de 1000 a 5000, un valor común para mayor robustez
+                )
+                
+                lime_weights = dict(exp.as_list(label=1))
+                current_lime_series = pd.Series(lime_weights)
+                current_lime_series = current_lime_series.reindex(feature_names, fill_value=0)
+                all_lime_importances.append(current_lime_series)
+            except Exception as e_inner:
+                print(f"[ERROR] Fallo al explicar instancia {idx} con LIME para RNN: {e_inner}")
+                # En caso de fallo, podemos añadir una serie de ceros para no detener el procesamiento.
+                # Esto hace que la media de LIME sea menos precisa para esa instancia, pero permite que el script continúe.
+                all_lime_importances.append(pd.Series(0.0, index=feature_names)) # Añadir ceros
+                continue 
+
+        if not all_lime_importances:
+            print(f"[ERROR] No se generaron explicaciones LIME válidas para RNN. Todas las instancias fallaron.")
+            return
+
+        avg_abs_lime_importances = pd.concat(all_lime_importances, axis=1).abs().mean(axis=1)
+        lime_series = avg_abs_lime_importances.sort_values(ascending=False).head(top_n)
+
+        plt.figure(figsize=(8, 6))
+        sns.barplot(x=lime_series.values, y=lime_series.index, palette="Greys")
+        plt.title(f"Importancia LIME (Promedio) - RNN")
+        plt.xlabel("Importancia media (absoluta)")
+        plt.ylabel("Característica")
+        plt.tight_layout()
+        plot_path = os.path.join(save_dir, f"rnn_lime.png")
+        plt.savefig(plot_path, dpi=300)
+        plt.close()
+        print(f"[XAI] Gráfico LIME guardado en: {plot_path}")
+
+    except Exception as e:
+        print(f"[ERROR] Fallo al generar gráfico LIME para RNN: {e}")
+
+    
+# --- Función Principal para Ejecutar el Módulo ---
+def main():
+    print("--- Cargando datos para el RNN y XAI ---")
+    # Cargar las características y etiquetas generadas por tsfresh
+    X_train_raw = pd.read_csv(FEATURES_TRAIN_CSV, index_col=0)
+    y_train = pd.read_csv(LABELS_TRAIN_CSV, index_col=0).squeeze() # .squeeze() convierte a Serie si es un DataFrame de 1 columna
+    X_test_raw = pd.read_csv(FEATURES_TEST_CSV, index_col=0).squeeze()
+    y_test = pd.read_csv(LABELS_TEST_CSV, index_col=0).squeeze()
+
+    # Seleccionar solo las características comunes si ya se hizo una selección previa
+    # Este paso es importante si usaste un método de selección de características (e.g., de tsfresh)
+    selected_features_path = "data/processed/selected_features.csv"
+    if os.path.exists(selected_features_path):
+        selected_columns_df = pd.read_csv(selected_features_path, header=None)
+        selected_columns = selected_columns_df.iloc[:, 0].tolist()
+        
+        # Filtrar solo las columnas seleccionadas que existen en los DataFrames raw
+        X_train = X_train_raw[[col for col in selected_columns if col in X_train_raw.columns]]
+        X_test = X_test_raw[[col for col in selected_columns if col in X_test_raw.columns]]
+        print(f"Usando {X_train.shape[1]} características seleccionadas de TSFRESH.")
     else:
-        print(f"[ERROR] Dimensiones inesperadas de SHAP: {shap_values.shape}")
-except Exception as e:
-    print("[ERROR] al calcular SHAP:", str(e))
+        print("[ADVERTENCIA] No se encontró el archivo de características seleccionadas. Usando todas las características.")
+        X_train = X_train_raw
+        X_test = X_test_raw
+    
+    # Asegúrate de que las columnas sean idénticas y en el mismo orden para X_train y X_test
+    # Esto es crucial para SHAP/LIME y para la consistencia del modelo.
+    common_cols = list(set(X_train.columns) & set(X_test.columns))
+    X_train = X_train[common_cols]
+    X_test = X_test[common_cols]
+    
+    # Reindexar para asegurar el orden alfabético (o cualquier orden consistente)
+    X_train = X_train.reindex(columns=sorted(X_train.columns))
+    X_test = X_test.reindex(columns=sorted(X_test.columns))
+
+    print(f"Shape de X_train final: {X_train.shape}")
+    print(f"Shape de X_test final: {X_test.shape}")
+
+    # Entrenar y evaluar el RNN
+    # Se pasan los DataFrames originales, la función de entrenamiento los escala internamente.
+    model, scaler, X_test_scaled, y_test_rnn, metrics = train_and_evaluate_rnn(X_train, y_train, X_test, y_test)
+
+    # Guardar métricas en un PNG
+    # Redondear las métricas a 2 decimales para una mejor visualización en la tabla
+    rounded_metrics = {k: round(v, 2) for k, v in metrics.items()}
+    metrics_df = pd.DataFrame([rounded_metrics])
+
+    fig, ax = plt.subplots(figsize=(6, 2))
+    ax.axis('off') # Ocultar ejes
+    
+    # Formatear el texto de las celdas para asegurar que los números se muestren limpiamente
+    cell_text = [[f"{value:.2f}" for value in row] for row in metrics_df.values]
+
+    table = ax.table(cellText=cell_text, # Usar el texto de las celdas formateado
+                     colLabels=metrics_df.columns, # Nombres de las columnas
+                     loc='center', cellLoc='center') # Posición y alineación del texto en las celdas
+    table.auto_set_font_size(False)
+    table.set_fontsize(12) # Tamaño de fuente
+    table.scale(1.2, 1.2) # Escalar la tabla
+    plt.tight_layout() # Ajustar el diseño para que no haya superposiciones
+    metrics_png_path = os.path.join(METRICS_OUTPUT_DIR, 'rnn_metrics.png')
+    plt.savefig(metrics_png_path, bbox_inches='tight', dpi=300) # Guardar la imagen
+    plt.close()
+    print(f"[INFO] Métricas del RNN guardadas en: {metrics_png_path}")
+
+    # Necesitamos X_train_scaled para el background de los explainers de XAI.
+    # Se escala X_train_raw con el mismo scaler usado en el entrenamiento.
+    X_train_scaled = pd.DataFrame(scaler.transform(X_train), columns=X_train.columns, index=X_train.index)
+
+    # Generar gráficos XAI
+    print("\n--- Generando gráficos XAI para el RNN ---")
+    generate_xai_barplots_rnn(model, scaler, X_test_scaled, X_train_scaled, X_train.columns, XAI_OUTPUT_DIR)
+
+    print("\nProceso de RNN y XAI completado.")
+
+
+if __name__ == "__main__":
+    main()

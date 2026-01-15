@@ -1,281 +1,449 @@
+import pandas as pd
+import numpy as np
 import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
-import numpy as np
-import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
-from lime import lime_tabular
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from sklearn.utils.class_weight import compute_class_weight
 import shap
-import random
-random.seed(42)
-np.random.seed(42)
-torch.manual_seed(42)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
-# -- Carga y preparación de datos --
-file_path_train = os.path.join("data", "processed", "dataset_windowed_train.csv")
-file_path_val = os.path.join("data", "processed", "dataset_windowed_val.csv")
-file_path_test = os.path.join("data", "processed", "dataset_windowed_test.csv")
+import lime
+import lime.lime_tabular
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tqdm import tqdm
 
-channels = ['EEG Fp1','EEG Fp2','EEG F7','EEG F3','EEG Fz','EEG F4','EEG F8',
-            'EEG T3','EEG C3','EEG Cz','EEG C4','EEG T4','EEG T5','EEG P3','EEG Pz',
-            'EEG P4','EEG T6','EEG O1','EEG O2']
+# --- Configuración de rutas (Asegúrate de que coincidan con donde guardas tus datos tsfresh) ---
+FEATURES_TRAIN_CSV = "data/processed/features_train.csv"
+LABELS_TRAIN_CSV = "data/processed/labels_train.csv"
+FEATURES_TEST_CSV = "data/processed/features_test.csv"
+LABELS_TEST_CSV = "data/processed/labels_test.csv"
+XAI_OUTPUT_DIR = "images/xai/"
+os.makedirs(XAI_OUTPUT_DIR, exist_ok=True)
 
-def load_and_prepare(csv_path):
-    df = pd.read_csv(csv_path)
-    print(f"[DEBUG] Cargando {csv_path} - shape original: {df.shape}")
-    grouped = df.groupby('window_id')
-    
-    X_windows = []
-    y_windows = []
-    
-    for window_id, group in grouped:
-        data_window = group[channels].to_numpy().T  # (channels, tiempo)
-        label = group['Seizure'].mode()[0]
-        X_windows.append(data_window)
-        y_windows.append(label)
-    
-    X = np.array(X_windows)
-    y = np.array(y_windows)
-    print(f"[DEBUG] Ventanas: {X.shape[0]}, Canales: {X.shape[1]}, Tiempo: {X.shape[2]}")
-    print(f"[DEBUG] Etiquetas únicas: {np.unique(y)}")
-    return X, y
-
-X_train, y_train = load_and_prepare(file_path_train)
-X_val, y_val = load_and_prepare(file_path_val)
-X_test, y_test = load_and_prepare(file_path_test)
-df_train = pd.read_csv('data/processed/dataset_windowed_train.csv')
-train_labels = y_train
-
-X_train = (X_train - X_train.mean(axis=2, keepdims=True)) / (X_train.std(axis=2, keepdims=True) + 1e-8)
-X_val = (X_val - X_val.mean(axis=2, keepdims=True)) / (X_val.std(axis=2, keepdims=True) + 1e-8)
-X_test = (X_test - X_test.mean(axis=2, keepdims=True)) / (X_test.std(axis=2, keepdims=True) + 1e-8)
-
-# Dataset personalizado
-class EEGDataset(Dataset):
-    def __init__(self, X_windows, y_windows):
-        self.X = torch.tensor(X_windows, dtype=torch.float32)
-        self.y = torch.tensor(y_windows, dtype=torch.long)
-        print(f"[DEBUG][Dataset] X shape: {self.X.shape}, y shape: {self.y.shape}")
+# --- 1. Definición del Modelo CNN (Igual que antes) ---
+class CNN1DClassifier(nn.Module):
+    def __init__(self, input_features_count, num_classes=2):
+        super(CNN1DClassifier, self).__init__()
         
-    def __len__(self):
-        return len(self.y)
-    
-    def __getitem__(self, idx):
-        x = self.X[idx].unsqueeze(0)  # (1, canales, tiempo)
-        y = self.y[idx]
-        return x, y
-
-train_dataset = EEGDataset(X_train, y_train)
-val_dataset = EEGDataset(X_val, y_val)
-test_dataset = EEGDataset(X_test, y_test)
-
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=32)
-test_loader = DataLoader(test_dataset, batch_size=32)
-
-# Modelo
-class EEGCNN(nn.Module):
-    def __init__(self, num_channels, time_points, num_classes):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 16, kernel_size=(3,5), padding=(1,2))
-        self.bn1 = nn.BatchNorm2d(16)
-        self.pool = nn.MaxPool2d((1,2))
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=(3,5), padding=(1,2))
-        self.bn2 = nn.BatchNorm2d(32)
+        self.conv1 = nn.Conv1d(in_channels=1, out_channels=64, kernel_size=3, padding=1)
+        self.pool1 = nn.MaxPool1d(kernel_size=2)
         
-        def conv_output_size(l_in, kernel_size=5, padding=2, stride=1, pool=2):
-            l_out = (l_in + 2*padding - kernel_size) // stride + 1
-            l_out = l_out // pool
-            return l_out
+        self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
+        self.pool2 = nn.MaxPool1d(kernel_size=2)
         
-        time_after = conv_output_size(time_points)
-        time_after = conv_output_size(time_after)
-        
-        self.fc1 = nn.Linear(32 * num_channels * time_after, 128)
-        self.fc2 = nn.Linear(128, num_classes)
-    
+        self.fc1_input_features = self._get_conv_output_size(input_features_count)
+
+        self.fc1 = nn.Linear(self.fc1_input_features, 64)
+        self.dropout = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(64, num_classes)
+
     def forward(self, x):
-        x = self.pool(F.relu(self.bn1(self.conv1(x))))
-        x = self.pool(F.relu(self.bn2(self.conv2(x))))
-        x = x.view(x.size(0), -1)
+        # x shape: (batch_size, input_features_count)
+        # Necesitamos (batch_size, 1, input_features_count) para Conv1d
+        x = x.unsqueeze(1) # Añade la dimensión de canal (1 canal)
+        
+        x = F.relu(self.conv1(x))
+        x = self.pool1(x)
+        
+        x = F.relu(self.conv2(x))
+        x = self.pool2(x)
+        
+        x = x.view(x.size(0), -1) # Aplanar el tensor para la capa totalmente conectada
+        
         x = F.relu(self.fc1(x))
+        x = self.dropout(x)
         x = self.fc2(x)
         return x
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = EEGCNN(num_channels=19, time_points=X_train.shape[2], num_classes=2).to(device)
-labels = train_labels
-class_weights = compute_class_weight('balanced', classes=np.array([0, 1]), y=labels)
-class_weights[1] *= 2
-class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
-criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    def _get_conv_output_size(self, input_length):
+        # Calcula el tamaño de salida convolucional para el forward
+        # Simula un paso hacia adelante con una entrada dummy
+        dummy_input = torch.rand(1, 1, input_length) # Correctly creates (1, channel, length)
+        x = self.pool1(F.relu(self.conv1(dummy_input)))
+        x = self.pool2(F.relu(self.conv2(x)))
+        return x.view(1, -1).size(1)
 
-def train(model, dataloader, criterion, optimizer, device):
-    model.train()
-    total_loss = 0
-    for i, (X_batch, y_batch) in enumerate(dataloader):
-        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-        optimizer.zero_grad()
-        outputs = model(X_batch)
-        loss = criterion(outputs, y_batch)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-        if i % 10 == 0:
-            print(f"[DEBUG][Train] Batch {i}, Loss: {loss.item():.4f}")
-    return total_loss / len(dataloader)
+# --- 2. Preparación de Datos (Dataset y DataLoader) ---
+class EEGFeaturesDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.tensor(X.values, dtype=torch.float32)
+        self.y = torch.tensor(y.values, dtype=torch.long)
 
-def evaluate(model, dataloader, device):
-    model.eval()
-    preds = []
-    trues = []
-    with torch.no_grad():
-        for i, (X_batch, y_batch) in enumerate(dataloader):
-            X_batch = X_batch.to(device)
-            outputs = model(X_batch)
-            _, predicted = torch.max(outputs, 1)
-            preds.extend(predicted.cpu().numpy())
-            trues.extend(y_batch.numpy())
-            if i % 10 == 0:
-                print(f"[DEBUG][Eval] Batch {i}, Pred sample: {predicted[0].item()}, True sample: {y_batch[0].item()}")
-    acc = accuracy_score(trues, preds)
-    prec = precision_score(trues, preds, zero_division=0)
-    rec = recall_score(trues, preds, zero_division=0)
-    f1 = f1_score(trues, preds, zero_division=0)
-    print(f"[DEBUG][Eval] Acc: {acc:.4f}, Prec: {prec:.4f}, Rec: {rec:.4f}, F1: {f1:.4f}")
-    return acc, prec, rec, f1, preds, trues
+    def __len__(self):
+        return len(self.X)
 
-# Entrenamiento con debug
-history = {"acc": [], "prec": [], "rec": [], "f1": [], "loss": []}
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
 
-for epoch in range(5): #<-------------------------------------------- EPOCAS !!!!!!!
+# --- 3. Función para Entrenar y Evaluar la CNN ---
+def train_and_evaluate_cnn(X_train, y_train, X_test, y_test,
+                           learning_rate=0.001, num_epochs=50, batch_size=64, random_state=42):
     
-    print(f"\n[INFO] Epoch {epoch+1}")
-    train_loss = train(model, train_loader, criterion, optimizer, device)
-    val_acc, val_prec, val_rec, val_f1, preds, trues = evaluate(model, val_loader, device)
-    print(f"Epoch {epoch+1} - Loss: {train_loss:.4f} - Val Acc: {val_acc:.4f} - Val F1: {val_f1:.4f}")
-    history["loss"].append(train_loss)
-    history["acc"].append(val_acc)
-    history["prec"].append(val_prec)
-    history["rec"].append(val_rec)
-    history["f1"].append(val_f1)
-    print("Distribución real:", np.bincount(trues))
-    print("Distribución predicha:", np.bincount(preds))
-    print(classification_report(trues, preds, target_names=['No Seizure', 'Seizure']))
-metrics_df = pd.DataFrame(history)
-metrics_df.index = [f"Epoch {i+1}" for i in range(len(metrics_df))]
-print("\nTabla de métricas por época:")
-print(metrics_df)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Usando dispositivo para CNN: {device}")
 
+    # Configurar semilla para reproducibilidad
+    torch.manual_seed(random_state)
+    np.random.seed(random_state)
 
-# Gráfico comparativo de métricas
-fig, ax = plt.subplots(figsize=(8, 2 + 0.5*len(metrics_df)))
-ax.axis('off')
-tbl = ax.table(cellText=np.round(metrics_df.values, 4),
-               colLabels=metrics_df.columns,
-               rowLabels=metrics_df.index,
-               loc='center',
-               cellLoc='center')
-tbl.auto_set_font_size(False)
-tbl.set_fontsize(10)
-tbl.scale(1.2, 1.2)
-plt.tight_layout()
-plt.savefig("images/results/cnn_metricas_comparativas.png", dpi=300)
-plt.close()
-print("[INFO] Gráfico de métricas guardado en images/results/cnn_metricas_comparativas.png")
+    # Escalado de características (Importante para CNNs)
+    scaler = StandardScaler()
+    X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns)
+    X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns)
 
-# LIME para explicar
-time_points = X_test.shape[2]
-X_test_flat = X_test.reshape(X_test.shape[0], -1)
+    # Preparar DataLoaders
+    train_dataset = EEGFeaturesDataset(X_train_scaled, y_train)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-def predict_fn(x_numpy):
-    x_tensor = torch.tensor(x_numpy.reshape(-1, 1, 19, time_points), dtype=torch.float32).to('cpu')
-    model_cpu = model.to('cpu')
-    model_cpu.eval()
+    test_dataset = EEGFeaturesDataset(X_test_scaled, y_test)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    # Inicializar el modelo
+    input_features_count = X_train_scaled.shape[1]
+    model = CNN1DClassifier(input_features_count=input_features_count).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Calcular pesos de clase para manejar desbalance de clases
+    class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(y_train), y=y_train)
+    weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+    criterion = nn.CrossEntropyLoss(weight=weights_tensor)
+
+    # Entrenamiento
+    print("\n--- Entrenando CNN ---")
+    model.train()
+    for epoch in range(num_epochs):
+        total_loss = 0
+        for batch_X, batch_y in tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}"):
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        # print(f"Epoch {epoch+1}, Loss: {total_loss / len(train_dataloader):.4f}")
+
+    # Evaluación
+    print("\n--- Evaluando CNN ---")
+    model.eval()
+    all_preds = []
+    all_probs = []
     with torch.no_grad():
-        outputs = model_cpu(x_tensor)
-        probs = torch.softmax(outputs, dim=1).cpu().numpy()
-    return probs
+        for batch_X, _ in test_dataloader:
+            batch_X = batch_X.to(device)
+            outputs = model(batch_X)
+            probs = F.softmax(outputs, dim=1)
+            _, predicted = torch.max(outputs.data, 1)
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
 
-torch.cuda.empty_cache()
-explainer = lime_tabular.LimeTabularExplainer(
-    X_test_flat,
-    feature_names=[f"C{c}_T{t}" for c in range(19) for t in range(time_points)],
-    class_names=['No Seizure', 'Seizure'],
-    discretize_continuous=False
-)
+    # Calcular métricas
+    accuracy = accuracy_score(y_test, all_preds)
+    precision = precision_score(y_test, all_preds)
+    recall = recall_score(y_test, all_preds)
+    f1 = f1_score(y_test, all_preds)
+    f1_macro = f1_score(y_test, all_preds, average='macro')
+    f1_micro = f1_score(y_test, all_preds, average='micro')
+    roc_auc = roc_auc_score(y_test, np.array(all_probs)[:, 1])
+    metrics = {
+        'Accuracy': accuracy,
+        'Precision': precision,
+        'Recall': recall,
+        'F1 Score': f1,
+        'F1 Macro': f1_macro,
+        'F1 Micro': f1_micro,
+        'AUC': roc_auc
+    }
+    print("\nMétricas de la CNN en Test:")
+    for metric, value in metrics.items():
+        print(f" - {metric}: {value:.4f}")
+    
+    return model, scaler, X_test_scaled, y_test, metrics
 
-exp = explainer.explain_instance(
-    X_test_flat[0],
-    predict_fn,
-    num_features=50,
-    top_labels=1
-)
+# --- 4. Funciones para XAI (SHAP y LIME) ---
 
-main_label = exp.available_labels()[0]
-feature_importance = dict(exp.as_list(label=main_label))
-lime_series = pd.Series(feature_importance).abs().sort_values(ascending=False)
-lime_importancia = np.zeros(19)
-for i, canal in enumerate(channels):
-    canal_feats = [f"C{i}_T{t}" for t in range(time_points) if f"C{i}_T{t}" in lime_series.index]
-    if canal_feats:
-        lime_importancia[i] = lime_series[canal_feats].mean()
+def generate_xai_barplots_cnn(model, scaler, X_test_scaled, X_train_scaled, feature_names, save_dir, top_n=10):
+    
+    device = next(model.parameters()).device # Obtener el dispositivo actual del modelo
+
+    # SHAP (KernelExplainer)
+    try:
+        # Usar una muestra más pequeña del conjunto de entrenamiento escalado como fondo para SHAP
+        # Esto es crucial para la eficiencia con KernelExplainer
+        background_data_for_shap = X_train_scaled.values[:min(50, len(X_train_scaled))] # Convertir a numpy
+        
+        # Wrap the model's predict_proba for SHAP
+        def model_predict_proba(x):
+            # x será un numpy array, puede ser (num_features,) para una sola instancia
+            # o (batch_size, num_features) para un lote.
+            # El modelo CNN1DClassifier espera (batch_size, 1, num_features).
+
+            # Asegurarse de que x es al menos 2D
+            if x.ndim == 1:
+                x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0).to(device) # (1, num_features)
+            else: # x.ndim == 2
+                x_tensor = torch.tensor(x, dtype=torch.float32).to(device) # (batch_size, num_features)
+            
+            # El modelo CNN1DClassifier.forward() se encarga de unsqueeze(1) a (batch_size, 1, num_features)
+            with torch.no_grad():
+                model.eval() # Asegurarse de que el modelo está en modo evaluación
+                outputs = model(x_tensor)
+                probabilities = F.softmax(outputs, dim=1)
+                return probabilities.cpu().numpy()
+
+        explainer = shap.KernelExplainer(model_predict_proba, background_data_for_shap)
+        
+        test_sample_for_shap = X_test_scaled.values[:min(100, len(X_test_scaled))]
+        shap_values_raw = explainer.shap_values(test_sample_for_shap)
+        
+        shap_values_for_plotting = None
+
+        if isinstance(shap_values_raw, list):
+            # This is the most common case for predict_proba: list of arrays, each (num_samples, num_features)
+            if len(shap_values_raw) > 1:
+                shap_values_for_plotting = shap_values_raw[1] # For the positive class (Seizure)
+            else:
+                print("[WARN] SHAP values list has only one element. Using the first one (index 0).")
+                shap_values_for_plotting = shap_values_raw[0]
+        else:
+            # This handles cases where shap_values_raw itself might be a single array.
+            # If it's (num_samples, num_features, num_classes), then select the class dimension.
+            if shap_values_raw.ndim == 3 and shap_values_raw.shape[2] == 2:
+                print("[INFO] SHAP values is a 3D array. Selecting values for class 1.")
+                shap_values_for_plotting = shap_values_raw[:, :, 1] # Select values for the positive class (index 1)
+            elif shap_values_raw.ndim == 2 and shap_values_raw.shape[1] == len(feature_names):
+                print("[INFO] SHAP values is a 2D array. Assuming it's for a single class.")
+                shap_values_for_plotting = shap_values_raw
+            else:
+                raise ValueError(f"Unexpected shape of shap_values_raw: {np.array(shap_values_raw).shape}")
+        
+        # Now, shap_values_for_plotting MUST be 2D: (num_samples, num_features)
+        if shap_values_for_plotting is None:
+            raise ValueError("Failed to determine shap_values for plotting.")
+
+        print(f"Shape of shap_values_for_plotting (after selection): {shap_values_for_plotting.shape}")
+
+        if shap_values_for_plotting.ndim == 2 and shap_values_for_plotting.shape[1] == len(feature_names):
+            mean_abs_shap = np.abs(shap_values_for_plotting).mean(axis=0)
+        else:
+            raise ValueError(f"Final SHAP values array for plotting has unexpected shape: {shap_values_for_plotting.shape}. Expected (num_samples, num_features).")
+
+        importances = pd.Series(mean_abs_shap, index=feature_names)
+        importances = importances.sort_values(ascending=False).head(top_n)
+
+        plt.figure(figsize=(8, 6))
+        sns.barplot(x=importances.values, y=importances.index, palette="Greys")
+        plt.title(f"Importancia de características (SHAP) - CNN")
+        plt.xlabel("Importancia media (absoluta)")
+        plt.ylabel("Características")
+        plt.tight_layout()
+        plot_path = os.path.join(save_dir, f"cnn_shap.png")
+        plt.savefig(plot_path, dpi=300)
+        plt.close()
+        print(f"[XAI] Gráfico SHAP guardado en: {plot_path}")
+
+    except Exception as e:
+        print(f"[ERROR] Fallo al generar gráfico SHAP para CNN: {e}")
+
+   # --- LIME ---
+    print("\n--- Generando explicaciones LIME para RNN ---")
+    try:
+        # Wrap the model's predict_proba for LIME
+        def lime_predict_proba(x):
+            device = next(model.parameters()).device 
+
+            if x.ndim == 1:
+                x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0).to(device)
+            else: 
+                x_tensor = torch.tensor(x, dtype=torch.float32).to(device)
+
+            # --- NEW DEBUGGING: Check input for non-zero variance ---
+            # If LIME sends constant inputs, model output might be constant too
+            if x_tensor.std(dim=0).mean() < 1e-6: # Check if std is near zero across features
+                print(f"[LIME DEBUG] WARNING: Very low variance in input x_tensor. Shape: {x_tensor.shape}, Sample (first 5 features): {x_tensor.cpu().numpy().flatten()[:5]}...")
+
+            with torch.no_grad():
+                model.eval() 
+                outputs = model(x_tensor)
+                
+                if torch.isnan(outputs).any():
+                    print(f"[LIME DEBUG] NaN detected in model outputs BEFORE softmax for LIME. Outputs: {outputs.cpu().numpy().flatten()[:5]}...")
+                    outputs = torch.where(torch.isnan(outputs), torch.tensor(0.0).to(device), outputs)
+                if torch.isinf(outputs).any():
+                    print(f"[LIME DEBUG] Inf detected in model outputs BEFORE softmax for LIME. Outputs: {outputs.cpu().numpy().flatten()[:5]}...")
+                    outputs = torch.where(torch.isinf(outputs), torch.tensor(1e6).to(device) * torch.sign(outputs), outputs) 
+                    
+                outputs = torch.clamp(outputs, min=-20.0, max=20.0)
+
+                probabilities = F.softmax(outputs, dim=1)
+                
+                # --- NEW DEBUGGING: Check if probabilities are nearly constant ---
+                # If probabilities are all the same, LIME can't find a linear relationship
+                if probabilities.shape[0] > 1: # Only check if batch size is > 1
+                    prob_std = probabilities.std(dim=0).mean()
+                    if prob_std < 1e-6:
+                        print(f"[LIME DEBUG] WARNING: Probabilities are almost constant for perturbed samples! Std: {prob_std:.6f}. Probs: {probabilities.cpu().numpy().flatten()[:4]}...")
+
+                if torch.isnan(probabilities).any() or torch.isinf(probabilities).any():
+                    print(f"[LIME DEBUG] NaN/Inf detected in probabilities AFTER softmax. Probs: {probabilities.cpu().numpy().flatten()[:5]}...")
+                if torch.min(probabilities) < 0 or torch.max(probabilities) > 1:
+                    print(f"[LIME DEBUG] Probabilities out of [0,1] range. Min: {torch.min(probabilities):.4f}, Max: {torch.max(probabilities):.4f}")
+
+                epsilon = 1e-8
+                probabilities = torch.clamp(probabilities, epsilon, 1 - epsilon)
+                
+                return probabilities.cpu().numpy()
+
+        # Check for constant features that might cause issues with LIME
+        if (X_train_scaled.std(axis=0) == 0).any():
+            constant_features = X_train_scaled.columns[X_train_scaled.std(axis=0) == 0].tolist()
+            print(f"[WARNING] Se encontraron características constantes en X_train_scaled que pueden causar problemas con LIME: {constant_features}. LIME podría fallar si intenta perturbar estas.")
+
+
+        explainer_lime = lime.lime_tabular.LimeTabularExplainer(
+            training_data=X_train_scaled.values, # Usar datos de entrenamiento escalados
+            feature_names=feature_names.tolist(), # Convertir a lista si es un Index
+            class_names=["No Seizure", "Seizure"],
+            mode="classification",
+            discretize_continuous=True, # <--- CAMBIO CRÍTICO: Establecer a True para mayor estabilidad
+            # discretizer='quartile' # <--- Opcional: Prueba esto si True no funciona
+        )
+        
+        all_lime_importances = []
+        num_lime_samples = min(50, len(X_test_scaled)) # Usar 50 muestras o el tamaño del test set si es menor
+        
+        for idx in tqdm(range(num_lime_samples), desc="Generando explicaciones LIME"):
+            data_row = X_test_scaled.iloc[idx].values # Obtener la fila como numpy array
+            
+            try:
+                exp = explainer_lime.explain_instance(
+                    data_row,
+                    lime_predict_proba,
+                    num_features=len(feature_names),
+                    top_labels=1,
+                    num_samples=5000 # <--- CAMBIO CRÍTICO: Restaurar un número alto de muestras para LIME
+                )
+                
+                # LIME devuelve una lista de tuplas (feature_name, importance)
+                lime_weights = dict(exp.as_list(label=1)) # Explicación para la clase positiva
+                current_lime_series = pd.Series(lime_weights)
+                current_lime_series = current_lime_series.reindex(feature_names, fill_value=0) # Asegurar todas las features
+                all_lime_importances.append(current_lime_series)
+            except Exception as e_inner:
+                print(f"[ERROR] Fallo al explicar instancia {idx} con LIME: {e_inner}")
+                # Si falla, añadir una serie de ceros para que el promedio no se rompa
+                all_lime_importances.append(pd.Series(0.0, index=feature_names)) 
+                continue # Continuar con la siguiente instancia si falla una
+
+        # --- IMPORTANT: Check if all explanations were zeros or if list is empty ---
+        if not all_lime_importances or all(s.sum() == 0 for s in all_lime_importances): 
+            print(f"[ERROR] No se generaron explicaciones LIME válidas (o todas son cero) para CNN. Todas las instancias fallaron o no tuvieron impacto.")
+            # Create an empty plot with a message to indicate no results
+            plt.figure(figsize=(8, 6))
+            plt.text(0.5, 0.5, "No LIME explanations generated or all are zero.\nCheck console for LIME DEBUG messages.", 
+                     horizontalalignment='center', verticalalignment='center', fontsize=12, color='red')
+            plt.axis('off')
+            plot_path = os.path.join(save_dir, f"rnn_lime.png") # Changed to rnn_lime.png
+            plt.savefig(plot_path, dpi=300)
+            plt.close()
+            return # Exit the function if no valid explanations
+
+        # Promediar las importancias absolutas de LIME
+        avg_abs_lime_importances = pd.concat(all_lime_importances, axis=1).abs().mean(axis=1)
+        lime_series = avg_abs_lime_importances.sort_values(ascending=False).head(top_n)
+
+        plt.figure(figsize=(8, 6))
+        sns.barplot(x=lime_series.values, y=lime_series.index, palette="Greys")
+        plt.title(f"Importancia LIME (Promedio) - CNN") # Changed to CNN for consistency
+        plt.xlabel("Importancia media (absoluta)")
+        plt.ylabel("Características")
+        plt.tight_layout()
+        plot_path = os.path.join(save_dir, f"rnn_lime.png") # Changed to rnn_lime.png
+        plt.savefig(plot_path, dpi=300)
+        plt.close()
+        print(f"[XAI] Gráfico LIME guardado en: {plot_path}")
+
+    except Exception as e:
+        print(f"[ERROR] Fallo al generar gráfico LIME para CNN: {e}")
+
+    
+# --- Función Principal para Ejecutar el Módulo ---
+def main():
+    print("--- Cargando datos para la CNN y XAI ---")
+    X_train_raw = pd.read_csv(FEATURES_TRAIN_CSV, index_col=0)
+    y_train = pd.read_csv(LABELS_TRAIN_CSV, index_col=0).squeeze()
+    X_test_raw = pd.read_csv(FEATURES_TEST_CSV, index_col=0).squeeze()
+    y_test = pd.read_csv(LABELS_TEST_CSV, index_col=0).squeeze()
+
+    # Seleccionar solo las características comunes si ya se hizo una selección previa
+    # Asume que `selected_features.csv` existe y tiene las columnas seleccionadas
+    selected_features_path = "data/processed/selected_features.csv"
+    if os.path.exists(selected_features_path):
+        selected_columns_df = pd.read_csv(selected_features_path, header=None)
+        selected_columns = selected_columns_df.iloc[:, 0].tolist()
+        
+        # Filtrar solo las columnas seleccionadas que existen en los DataFrames raw
+        X_train = X_train_raw[[col for col in selected_columns if col in X_train_raw.columns]]
+        X_test = X_test_raw[[col for col in selected_columns if col in X_test_raw.columns]]
+        print(f"Usando {X_train.shape[1]} características seleccionadas de TSFRESH.")
     else:
-        lime_importancia[i] = 0  # Si no hay features, importancia 0
-lime_canal_series = pd.Series(lime_importancia, index=channels).sort_values(ascending=False)
+        print("[ADVERTENCIA] No se encontró el archivo de características seleccionadas. Usando todas las características.")
+        X_train = X_train_raw
+        X_test = X_test_raw
+    
+    # Asegúrate de que las columnas sean idénticas y en el mismo orden para X_train y X_test
+    # Esto es crucial para SHAP/LIME que dependen del orden de las características
+    common_cols = list(set(X_train.columns) & set(X_test.columns))
+    X_train = X_train[common_cols]
+    X_test = X_test[common_cols]
+    
+    # Reindexar para asegurar el orden
+    X_train = X_train.reindex(columns=sorted(X_train.columns))
+    X_test = X_test.reindex(columns=sorted(X_test.columns))
 
+    print(f"Shape de X_train final: {X_train.shape}")
+    print(f"Shape de X_test final: {X_test.shape}")
 
-plt.figure(figsize=(8, 6))
-print("LIME canal series:\n", lime_canal_series)
-sns.barplot(x=lime_canal_series.values, y=lime_canal_series.index, palette="magma")
-plt.title("Importancia LIME - CNN")
-plt.xlabel("Importancia absoluta")
-plt.tight_layout()
-plt.savefig("images/xai/cnn_lime.png", dpi=300)
-plt.close()
-print("[INFO] Gráfico LIME guardado en images/xai/cnn_lime.png")
+    # Entrenar y evaluar la CNN
+    model, scaler, X_test_scaled, y_test_cnn, metrics = train_and_evaluate_cnn(X_train, y_train, X_test, y_test)
 
-# SHAP para explicar
-model = model.to(device)
-background = torch.tensor(X_test[:50], dtype=torch.float32).unsqueeze(1).to(device)
-test_sample = torch.tensor(X_test[0:1], dtype=torch.float32).unsqueeze(1).to(device)
+    # Guardar métricas en un PNG
+    # Redondear las métricas a 2 decimales para una mejor visualización
+    rounded_metrics = {k: round(v, 2) for k, v in metrics.items()}
+    metrics_df = pd.DataFrame([rounded_metrics])
 
-model.eval()
-explainer_shap = shap.GradientExplainer(model, background)
-shap_values = explainer_shap.shap_values(test_sample)
+    fig, ax = plt.subplots(figsize=(6, 2))
+    ax.axis('off')
+    
+    # Formatear el texto de las celdas para asegurar que los números se muestren limpiamente con 2 decimales
+    cell_text = [[f"{value:.2f}" for value in row] for row in metrics_df.values]
 
-if isinstance(shap_values, list):
-    if len(shap_values) == 1:
-        shap_importance = np.abs(shap_values[0]).mean(axis=(0, 1))
-    else:
-        shap_importance = np.abs(shap_values[1]).mean(axis=(0, 1))
-else:
-    shap_importance = np.abs(shap_values).mean(axis=(0, 1))
-
-print("shap_importance shape:", shap_importance.shape)
-num_features = shap_importance.size
-reduced_time_points = num_features // 19
-
-if num_features % 19 == 0:
-    shap_importancia = shap_importance[:19 * reduced_time_points].reshape(19, reduced_time_points).mean(axis=1)
-    shap_canal_series = pd.Series(shap_importancia, index=channels).sort_values(ascending=False)
-
-    plt.figure(figsize=(8, 6))
-    print("SHAP canal series:\n", shap_canal_series)
-    sns.barplot(x=shap_canal_series.values, y=shap_canal_series.index, palette="viridis")
-    plt.title("Importancia SHAP - CNN")
-    plt.xlabel("Importancia media absoluta")
+    table = ax.table(cellText=cell_text, # Usar el texto de las celdas formateado
+                     colLabels=metrics_df.columns,
+                     loc='center', cellLoc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(12)
+    table.scale(1.2, 1.2)
     plt.tight_layout()
-    plt.savefig("images/xai/cnn_shap.png", dpi=300)
+    metrics_png_path = os.path.join("images","results", 'cnn_metrics.png')
+    plt.savefig(metrics_png_path, bbox_inches='tight', dpi=300)
     plt.close()
-    print("[INFO] Gráfico SHAP guardado en images/xai/cnn_shap.png")
-else:
-    print(f"[ERROR] El número de features SHAP ({num_features}) no es múltiplo de 19. No se puede agrupar por canal.")
+    print(f"[INFO] Métricas de la CNN guardadas en: {metrics_png_path}")
+
+    # Necesitamos X_train_scaled para el background de los explainers
+    # Asegurarse de que X_train_scaled tiene las mismas columnas y orden que X_train
+    X_train_scaled = pd.DataFrame(scaler.transform(X_train), columns=X_train.columns, index=X_train.index)
+
+    # Generar gráficos XAI
+    print("\n--- Generando gráficos XAI para la CNN ---")
+    generate_xai_barplots_cnn(model, scaler, X_test_scaled, X_train_scaled, X_train.columns, XAI_OUTPUT_DIR)
+
+    print("\nProceso de CNN y XAI completado.")
+    
+if __name__ == "__main__":
+    main()
