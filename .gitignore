@@ -17,3 +17,6 @@
 /data/processed/labels_test.csv
 /data/processed/labels_val.csv
 /data/processed/selected_features.csv
+/data/processed/sessions/*
+/data/processed/holdout/*
+/data/processed/folds/*
