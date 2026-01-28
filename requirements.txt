@@ -1,0 +1,38 @@
+# ============ Core Data Science ============
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+
+# ============ Machine Learning ============
+scikit-learn>=1.3.0
+xgboost>=2.0.0
+
+# ============ Deep Learning ============
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# ============ EEG Processing ============
+mne>=1.5.0
+tsfresh>=0.20.0
+
+# ============ Hyperparameter Optimization ============
+optuna>=3.5.0
+
+# ============ Visualization ============
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.18.0
+
+# ============ Explainability (XAI) ============
+shap>=0.44.0
+lime>=0.2.0
+
+# ============ Progress Bars ============
+tqdm>=4.65.0
+
+# ============ Time Series Models (optional) ============
+# chronos-forecasting>=0.1.0  # Descomentar si usas amazon_transformer.py
+
+# ============ Utilities ============
+joblib>=1.3.0

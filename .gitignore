@@ -22,3 +22,5 @@
 /data/processed/folds/*
 /data/processed/windowed/*
 /data/processed/dataset_clipped/*
+.venv/
+env/

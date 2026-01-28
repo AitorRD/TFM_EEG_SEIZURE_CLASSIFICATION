@@ -1,0 +1,424 @@
+# ============================================================
+# CONFIGURACIÓN UNIFICADA - EXPERIMENTOS ML & DL
+# EEG Seizure Classification
+# ============================================================
+
+# ============================================================
+# CONFIGURACIÓN GENERAL
+# ============================================================
+experiment:
+  name: "eeg_seizure_experiment"
+  type: "ml"  # CAMBIAR A: 'ml' para Machine Learning tradicional o 'dl' para Deep Learning
+  random_state: 42
+  n_jobs: -1  # -1 = usar todos los cores disponibles (para ML)
+  device: "cuda"  # 'cuda' o 'cpu' (solo para DL, se ignora en ML)
+
+# ============================================================
+# RUTAS DE DATOS
+# ============================================================
+paths:
+  data:
+    train: "data/processed/windowed/dataset_windowed_train.csv"
+    val: "data/processed/windowed/dataset_windowed_val.csv"
+    test: "data/processed/windowed/dataset_windowed_test.csv"
+  features:
+    train: "data/processed/features_train.csv"
+    val: "data/processed/features_val.csv"
+    test: "data/processed/features_test.csv"
+  labels:
+    train: "data/processed/labels_train.csv"
+    val: "data/processed/labels_val.csv"
+    test: "data/processed/labels_test.csv"
+  selected_features: "data/processed/selected_features.csv"
+  results:
+    metrics: "images/results/ml_test_metrics.png"  # Cambiar nombre según experimento
+    xai_dir: "images/xai"
+    optuna_dir: "data/processed/optuna_results"
+
+# ============================================================
+# EXTRACCIÓN DE FEATURES (TSFRESH)
+# Solo se usa si experiment.type = 'ml' o si DL usa data_format = 'features'
+# ============================================================
+feature_extraction:
+  enabled: true  # false = cargar features ya extraídas desde CSV
+  custom_fc_parameters:
+    absolute_sum_of_changes: null
+    mean_abs_change: null
+    longest_strike_above_mean: null
+    longest_strike_below_mean: null
+    number_peaks:
+      - n: 3
+      - n: 5
+    root_mean_square: null
+    autocorrelation:
+      - lag: 1
+
+# ============================================================
+# SELECCIÓN DE FEATURES
+# Solo se usa para ML o si DL usa data_format = 'features'
+# ============================================================
+feature_selection:
+  enabled: true
+  method: "SelectKBest"  # SelectKBest, SelectFromModel, RFE
+  k: 50  # Número de features a seleccionar
+
+# ============================================================
+# VALIDACIÓN CRUZADA
+# Recomendado para ML, computacionalmente costoso para DL
+# ============================================================
+cross_validation:
+  enabled: true  # Activar para ML, desactivar para DL
+  n_folds: 5
+  shuffle: true
+  scoring: "f1_weighted"  # f1_weighted, f1_macro, accuracy, roc_auc
+
+# ============================================================
+# OPTIMIZACIÓN CON OPTUNA
+# Funciona tanto para ML como DL
+# ============================================================
+optuna:
+  enabled: true
+  n_trials: 100  # Reducir a 30-50 para DL (más lento)
+  timeout: null  # Tiempo máximo en segundos (null = sin límite)
+  n_startup_trials: 10
+  n_warmup_steps: 5
+  pruner: "median"  # median, hyperband, percentile
+  show_progress_bar: true
+
+# ============================================================
+# MODELOS DE MACHINE LEARNING TRADICIONAL
+# Activar cuando experiment.type = 'ml'
+# ============================================================
+models:
+  lr:
+    name: "Logistic Regression"
+    enabled: true  # CAMBIAR A true/false para activar/desactivar
+    default_params:
+      max_iter: 1000
+      class_weight: "balanced"
+    optuna_search_space:
+      C:
+        type: "loguniform"
+        low: 0.001
+        high: 100
+      solver:
+        type: "categorical"
+        choices: ["lbfgs", "liblinear", "saga"]
+      max_iter:
+        type: "int"
+        low: 1000
+        high: 3000
+
+  rf:
+    name: "Random Forest"
+    enabled: true
+    default_params:
+      class_weight: "balanced"
+    optuna_search_space:
+      n_estimators:
+        type: "int"
+        low: 50
+        high: 300
+      max_depth:
+        type: "int"
+        low: 10
+        high: 50
+      min_samples_split:
+        type: "int"
+        low: 2
+        high: 10
+      min_samples_leaf:
+        type: "int"
+        low: 1
+        high: 4
+
+  svc:
+    name: "Support Vector Classifier"
+    enabled: true
+    default_params:
+      probability: true
+      class_weight: "balanced"
+    optuna_search_space:
+      C:
+        type: "loguniform"
+        low: 0.1
+        high: 100
+      kernel:
+        type: "categorical"
+        choices: ["linear", "rbf", "poly"]
+      gamma:
+        type: "categorical"
+        choices: ["scale", "auto"]
+
+  knn:
+    name: "K-Nearest Neighbors"
+    enabled: false
+    default_params: {}
+    optuna_search_space:
+      n_neighbors:
+        type: "int"
+        low: 3
+        high: 15
+      weights:
+        type: "categorical"
+        choices: ["uniform", "distance"]
+      metric:
+        type: "categorical"
+        choices: ["euclidean", "manhattan", "minkowski"]
+
+  xgb:
+    name: "XGBoost"
+    enabled: true
+    default_params:
+      use_label_encoder: false
+      eval_metric: "logloss"
+    optuna_search_space:
+      n_estimators:
+        type: "int"
+        low: 50
+        high: 300
+      max_depth:
+        type: "int"
+        low: 3
+        high: 10
+      learning_rate:
+        type: "loguniform"
+        low: 0.001
+        high: 0.3
+      subsample:
+        type: "uniform"
+        low: 0.6
+        high: 1.0
+      colsample_bytree:
+        type: "uniform"
+        low: 0.6
+        high: 1.0
+
+# ============================================================
+# XAI - EXPLAINABLE AI
+# Recomendado solo para ML (lento para DL)
+# ============================================================
+xai:
+  enabled: true  # Activar para ML, desactivar para DL
+  methods:
+    shap:
+      enabled: true
+      background_samples: 100  # Número de muestras para background en SHAP
+      top_features: 10
+    lime:
+      enabled: true
+      n_samples: 50  # Número de instancias de test para explicar
+      top_features: 10
+      discretize_continuous: true
+
+# ============================================================
+# MÉTRICAS A REPORTAR
+# ============================================================
+metrics:
+  - accuracy
+  - precision
+  - recall
+  - f1_score
+  - f1_macro
+  - f1_micro
+  - roc_auc
+
+# ============================================================
+# ============================================================
+# CONFIGURACIÓN DE DEEP LEARNING
+# Activar cuando experiment.type = 'dl'
+# ============================================================
+# ============================================================
+
+deep_learning:
+  enabled: false  # CAMBIAR A true cuando experiment.type = 'dl'
+  epochs: 50
+  batch_size: 32
+  
+  # Early Stopping: detiene entrenamiento si no hay mejora
+  early_stopping:
+    enabled: true
+    patience: 10  # Épocas sin mejora antes de detener
+    min_delta: 0.001  # Mejora mínima requerida
+    monitor: "val_f1"  # val_loss, val_f1, val_accuracy
+  
+  # Learning Rate Scheduler: ajusta lr dinámicamente
+  lr_scheduler:
+    enabled: true
+    type: "ReduceLROnPlateau"  # ReduceLROnPlateau, StepLR, CosineAnnealingLR
+    factor: 0.5  # Factor de reducción del lr
+    patience: 5  # Épocas sin mejora antes de reducir lr
+    mode: "max"  # 'max' para f1/accuracy, 'min' para loss
+  
+  # Formato de datos
+  # 'raw' = ventanas temporales (B, T, C) para Transformer/LSTM/GRU
+  # 'features' = features extraídas (B, F) para CNN sobre features
+  data_format: "raw"
+  input_channels: 19  # Número de canales EEG
+  sequence_length: 3000  # Longitud de ventana temporal
+
+# ============================================================
+# MODELOS DE DEEP LEARNING
+# Activar cuando experiment.type = 'dl'
+# Requiere: pip install torch skorch
+# ============================================================
+dl_models:
+  # Transformer: mejor para secuencias largas, captura dependencias globales
+  transformer:
+    name: "EEG Transformer"
+    enabled: false  # CAMBIAR A true para usar
+    default_params:
+      input_dim: 19
+      seq_len: 3000
+      d_model: 64
+      nhead: 4
+      num_layers: 2
+      dropout: 0.1
+      num_classes: 2
+    optuna_search_space:
+      lr:
+        type: "loguniform"
+        low: 0.00001
+        high: 0.001
+      d_model:
+        type: "categorical"
+        choices: [32, 64, 128]
+      nhead:
+        type: "categorical"
+        choices: [2, 4, 8]
+      num_layers:
+        type: "int"
+        low: 1
+        high: 4
+      dropout:
+        type: "uniform"
+        low: 0.1
+        high: 0.5
+      weight_decay:
+        type: "loguniform"
+        low: 0.00001
+        high: 0.01
+
+  # CNN 1D: trabaja con features extraídas, rápido y efectivo
+  cnn:
+    name: "1D CNN"
+    enabled: false
+    default_params:
+      input_features: 50  # Se ajusta automáticamente según features seleccionadas
+      conv1_channels: 64
+      conv2_channels: 128
+      fc_hidden: 64
+      dropout: 0.5
+      num_classes: 2
+    optuna_search_space:
+      lr:
+        type: "loguniform"
+        low: 0.00001
+        high: 0.001
+      conv1_channels:
+        type: "categorical"
+        choices: [32, 64, 128]
+      conv2_channels:
+        type: "categorical"
+        choices: [64, 128, 256]
+      fc_hidden:
+        type: "categorical"
+        choices: [32, 64, 128]
+      dropout:
+        type: "uniform"
+        low: 0.2
+        high: 0.7
+      weight_decay:
+        type: "loguniform"
+        low: 0.00001
+        high: 0.01
+
+  # LSTM: bueno para secuencias, captura dependencias temporales
+  lstm:
+    name: "LSTM RNN"
+    enabled: false
+    default_params:
+      input_dim: 19
+      hidden_dim: 128
+      num_layers: 2
+      dropout: 0.3
+      bidirectional: true
+      num_classes: 2
+    optuna_search_space:
+      lr:
+        type: "loguniform"
+        low: 0.00001
+        high: 0.001
+      hidden_dim:
+        type: "categorical"
+        choices: [64, 128, 256]
+      num_layers:
+        type: "int"
+        low: 1
+        high: 3
+      dropout:
+        type: "uniform"
+        low: 0.1
+        high: 0.5
+      weight_decay:
+        type: "loguniform"
+        low: 0.00001
+        high: 0.01
+
+  # GRU: similar a LSTM pero más rápido, menos parámetros
+  gru:
+    name: "GRU RNN"
+    enabled: false
+    default_params:
+      input_dim: 19
+      hidden_dim: 128
+      num_layers: 2
+      dropout: 0.3
+      bidirectional: true
+      num_classes: 2
+    optuna_search_space:
+      lr:
+        type: "loguniform"
+        low: 0.00001
+        high: 0.001
+      hidden_dim:
+        type: "categorical"
+        choices: [64, 128, 256]
+      num_layers:
+        type: "int"
+        low: 1
+        high: 3
+      dropout:
+        type: "uniform"
+        low: 0.1
+        high: 0.5
+      weight_decay:
+        type: "loguniform"
+        low: 0.00001
+        high: 0.01
+
+# ============================================================
+# EJEMPLOS DE CONFIGURACIÓN RÁPIDA
+# ============================================================
+#
+# PARA EJECUTAR ML TRADICIONAL:
+# 1. Cambiar experiment.type = "ml"
+# 2. Habilitar modelos en sección 'models' (enabled: true)
+# 3. Configurar feature_extraction.enabled = true
+# 4. Configurar feature_selection.enabled = true
+# 5. Configurar cross_validation.enabled = true
+# 6. Configurar xai.enabled = true
+# 7. deep_learning.enabled = false
+#
+# PARA EJECUTAR DEEP LEARNING:
+# 1. Cambiar experiment.type = "dl"
+# 2. Deshabilitar modelos ML (models.*.enabled = false)
+# 3. Habilitar deep_learning.enabled = true
+# 4. Habilitar modelo DL en sección 'dl_models' (enabled: true)
+# 5. Configurar deep_learning.data_format = "raw" o "features"
+# 6. Configurar cross_validation.enabled = false (muy lento para DL)
+# 7. Configurar xai.enabled = false (SHAP/LIME lentos para DL)
+# 8. Ajustar optuna.n_trials a 30-50 (DL es más lento)
+#
+# ============================================================
+
