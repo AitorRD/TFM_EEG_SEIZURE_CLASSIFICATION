@@ -22,5 +22,6 @@
 /data/processed/folds/*
 /data/processed/windowed/*
 /data/processed/dataset_clipped/*
+/data/processed/debug_conversion.py
 .venv/
 env/
