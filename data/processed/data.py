@@ -1,15 +1,15 @@
 """
-Pipeline Completo de Procesamiento de Datos EEG
-================================================
-Este script ejecuta todo el proceso de preparación de datos:
-1. Conversión EDF → CSV (con preprocesamiento y clipping)
-2. Concatenación y división train/val/test
-3. Ventanado (windowing) para series temporales
+Complete EEG Data Processing Pipeline
+======================================
+This script executes the entire data preparation process:
+1. EDF to CSV conversion (with preprocessing and clipping)
+2. Concatenation and train/val/test split
+3. Windowing for time series
 
-Uso:
+Usage:
     python data/processed/data.py
     
-O ejecutar pasos individuales:
+Or run individual steps:
     python data/processed/data.py --step conversion
     python data/processed/data.py --step concat
     python data/processed/data.py --step window
@@ -20,26 +20,26 @@ import sys
 import time
 import os
 
-# Agregar el directorio raíz al path para imports
+# Add root directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 
 def run_conversion():
     """
-    Paso 1: Conversión de archivos EDF a CSV
-    - Lee archivos EDF de pacientes
-    - Aplica preprocesamiento (filtros, ICA, resample)
-    - Marca convulsiones según archivos de texto
-    - Aplica clipping (recorte) alrededor de convulsiones
-    - Guarda CSV en data/raw/csv-data/
+    Step 1: EDF to CSV conversion
+    - Reads patient EDF files
+    - Applies preprocessing (filters, ICA, resample)
+    - Marks seizures according to text files
+    - Applies clipping around seizures
+    - Saves CSV to data/raw/csv-data/
     """
     print("\n" + "="*70)
-    print("  PASO 1: CONVERSIÓN EDF → CSV")
+    print("  STEP 1: EDF to CSV CONVERSION")
     print("="*70 + "\n")
     
     start_time = time.time()
     
-    # Importar y ejecutar el script de conversión
+    # Import conversion script dependencies
     import mne
     import pandas as pd
     import numpy as np
@@ -62,14 +62,14 @@ def run_conversion():
         seizure_indices = seizure_series[seizure_series == 1].index
 
         if len(seizure_indices) == 0:
-            print("  ⚠️  No se detectaron convulsiones. Retornando DataFrame original sin clipping.")
+            print("  No seizures detected. Returning original DataFrame without clipping.")
             return df
 
-        # Detectar bloques continuos de seizure
+        # Detect continuous seizure blocks
         seizure_diff = seizure_indices.to_series().diff().fillna(1)
         block_ids = (seizure_diff != 1).cumsum()
 
-        # Crear rangos extendidos por contexto
+        # Create extended ranges with context
         ranges = []
         for i, (block_id, block) in enumerate(seizure_indices.to_series().groupby(block_ids), 1):
             block = block.index if hasattr(block, 'index') else pd.Index([block])
@@ -77,10 +77,10 @@ def run_conversion():
             end = block.max() + context_samples
             start = max(start, 0)
             end = min(end, df.index[-1])
-            print(f"    Bloque {i}: Recorte desde índice {start} hasta {end}")
+            print(f"    Block {i}: Clipping from index {start} to {end}")
             ranges.append((start, end))
 
-        # Fusionar rangos solapados
+        # Merge overlapping ranges
         merged_ranges = []
         for start, end in sorted(ranges):
             if not merged_ranges or start > merged_ranges[-1][1]:
@@ -88,19 +88,19 @@ def run_conversion():
             else:
                 merged_ranges[-1][1] = max(merged_ranges[-1][1], end)
 
-        print(f"  Rangos después de fusión: {len(merged_ranges)}")
+        print(f"  Ranges after merging: {len(merged_ranges)}")
 
-        # Recortar el DataFrame
+        # Clip the DataFrame
         clipped_df = pd.concat([df.loc[start:end] for start, end in merged_ranges])
-        print(f"  Tamaño original: {len(df)} → Tamaño recortado: {len(clipped_df)} filas")
+        print(f"  Original size: {len(df)} -> Clipped size: {len(clipped_df)} rows")
         return clipped_df
 
-    # Contadores
+    # Counters
     files_processed = 0
     files_skipped = 0
     files_failed = 0
 
-    # Procesar pacientes
+    # Process patients
     for patient_folder in tqdm.tqdm(os.listdir(file_path_read), desc="Procesando pacientes"):
         patient_path = os.path.join(file_path_read, patient_folder)
         if not os.path.isdir(patient_path):
@@ -108,7 +108,7 @@ def run_conversion():
 
         seizures = {}
         
-        # Buscar archivo de convulsiones
+        # Search for seizures file
         txt_file = next((f for f in os.listdir(patient_path) if f.endswith(".txt")), None)
         
         if txt_file:
@@ -116,7 +116,7 @@ def run_conversion():
             with open(txt_path, "r") as f:
                 content = f.read()
             
-            # Extraer información de convulsiones
+            # Extract seizure information
             matches = re.findall(
                 r"(?:File name:\s*([\w\-.]+\.edf))?\s*"
                 r"(?:Registration start time:\s*(\d+[\.:]\d+[\.:]\d+))?\s*"
@@ -135,7 +135,7 @@ def run_conversion():
                 if file_name not in seizures:
                     seizures[file_name] = []
 
-                # Convertir tiempos a segundos
+                # Convert times to seconds
                 if reg_start > seiz_start:
                     if reg_start:
                         seiz_start_sec = abs((time_to_seconds(seiz_start.strip()) + 24*3600) - time_to_seconds(reg_start.strip()))
@@ -155,7 +155,7 @@ def run_conversion():
                     "end_time": seiz_start_sec + time_diff,
                 })
 
-        # Procesar archivos EDF
+        # Process EDF files
         for file in os.listdir(patient_path):
             if file.endswith(".edf"):
                 edf_path = os.path.join(patient_path, file)
@@ -163,7 +163,7 @@ def run_conversion():
                 os.makedirs(csv_patient_path, exist_ok=True)
                 csv_path = os.path.join(csv_patient_path, file.replace(".edf", "_clipped.csv"))
                 
-                # Verificar si el archivo ya existe
+                # Check if file already exists
                 if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
                     files_skipped += 1
                     continue
@@ -197,37 +197,37 @@ def run_conversion():
                     if df["Time (s)"].max() >= (1800*2 + seizures.get(file, [{}])[0].get("end_time", 0) - seizures.get(file, [{}])[0].get("start_time", 0)):
                         df = clipping(df, freq_hz=100, minutes=30)
                     
-                    # Solo guardar si el DataFrame tiene datos
+                    # Only save if DataFrame has data
                     if len(df) > 0:
                         df.fillna(0, inplace=True)
                         df.to_csv(csv_path, index=False)
                         files_processed += 1
                     else:
-                        print(f"  ⚠️  {file}: DataFrame vacío después de clipping, no se guarda.")
+                        print(f"  {file}: Empty DataFrame after clipping, not saved.")
                         files_failed += 1
 
                 except Exception as e:
-                    print(f"  ❌ Error procesando {file}: {e}")
+                    print(f"  Error processing {file}: {e}")
                     files_failed += 1
     
     elapsed_time = time.time() - start_time
-    print(f"\n✓ Conversión completada en {elapsed_time:.2f} segundos")
-    print(f"  Archivos procesados: {files_processed}")
-    print(f"  Archivos saltados (ya existían): {files_skipped}")
-    print(f"  Archivos fallidos: {files_failed}")
-    print(f"  Archivos guardados en: {file_path_write}\n")
+    print(f"\nConversion completed in {elapsed_time:.2f} seconds")
+    print(f"  Files processed: {files_processed}")
+    print(f"  Files skipped (already existed): {files_skipped}")
+    print(f"  Files failed: {files_failed}")
+    print(f"  Files saved to: {file_path_write}\n")
 
 
 def run_concat():
     """
-    Paso 2: Concatenación y división train/val/test
-    - Lee todos los CSV clipped
-    - Agrupa por sesión
-    - Divide en train (70%), val (15%), test (15%)
-    - Guarda en data/processed/dataset_clipped/
+    Step 2: Concatenation and train/val/test split
+    - Reads all clipped CSVs
+    - Groups by session
+    - Splits into train (70%), val (15%), test (15%)
+    - Saves to data/processed/dataset_clipped/
     """
     print("\n" + "="*70)
-    print("  PASO 2: CONCATENACIÓN Y DIVISIÓN TRAIN/VAL/TEST")
+    print("  STEP 2: CONCATENATION AND TRAIN/VAL/TEST SPLIT")
     print("="*70 + "\n")
     
     start_time = time.time()
@@ -246,21 +246,21 @@ def run_concat():
 
     session_dfs = {}
 
-    # Leer y agrupar por sesión
-    print("Leyendo archivos CSV...")
+    # Read and group by session
+    print("Reading CSV files...")
     for subdir, dirs, files in os.walk(root_dir):
         for file in files:
             if file.endswith('_clipped.csv'):
                 file_path = os.path.join(subdir, file)
                 try:
-                    # Verificar que el archivo no esté vacío
+                    # Check if file is not empty
                     if os.path.getsize(file_path) == 0:
-                        print(f"  ⚠️  Archivo vacío, saltando: {file}")
+                        print(f"  Empty file, skipping: {file}")
                         continue
                     
                     df = pd.read_csv(file_path)
                     
-                    # Renombrar columnas inconsistentes
+                    # Rename inconsistent columns
                     rename_dict = {}
                     cols = df.columns
                     if "EEG CZ" in cols:
@@ -276,21 +276,21 @@ def run_concat():
                         session_dfs[session_id] = df_session
 
                 except Exception as e:
-                    print(f"  ⚠️  Saltando {file} (posible archivo vacío o corrupto): {e}")
+                    print(f"  Skipping {file} (possibly empty or corrupted): {e}")
                     continue
 
-    print(f"  Total sesiones encontradas: {len(session_dfs)}")
+    print(f"  Total sessions found: {len(session_dfs)}")
 
-    # Dividir sesiones
+    # Split sessions
     session_ids = list(session_dfs.keys())
     train_ids, temp_ids = train_test_split(session_ids, test_size=0.3, random_state=42)
     val_ids, test_ids = train_test_split(temp_ids, test_size=0.5, random_state=42)
 
-    print(f"  Train: {len(train_ids)} sesiones")
-    print(f"  Val:   {len(val_ids)} sesiones")
-    print(f"  Test:  {len(test_ids)} sesiones")
+    print(f"  Train: {len(train_ids)} sessions")
+    print(f"  Val:   {len(val_ids)} sessions")
+    print(f"  Test:  {len(test_ids)} sessions")
 
-    # Concatenar y guardar
+    # Concatenate and save
     train_df = pd.concat([session_dfs[sid] for sid in train_ids], ignore_index=True)
     val_df = pd.concat([session_dfs[sid] for sid in val_ids], ignore_index=True)
     test_df = pd.concat([session_dfs[sid] for sid in test_ids], ignore_index=True)
@@ -300,20 +300,20 @@ def run_concat():
     test_df.to_csv(os.path.join(output_dir, "test.csv"), index=False)
 
     elapsed_time = time.time() - start_time
-    print(f"\n✓ Concatenación completada en {elapsed_time:.2f} segundos")
-    print(f"  Archivos guardados en: {output_dir}\n")
+    print(f"\nConcatenation completed in {elapsed_time:.2f} seconds")
+    print(f"  Files saved to: {output_dir}\n")
 
 
 def run_window():
     """
-    Paso 3: Ventanado (windowing)
-    - Crea ventanas deslizantes de 10 segundos
-    - Overlap de 25%
-    - Genera ventanas por sesión
-    - Guarda en data/processed/windowed/
+    Step 3: Windowing
+    - Creates sliding windows of 10 seconds
+    - 25% overlap
+    - Generates windows per session
+    - Saves to data/processed/windowed/
     """
     print("\n" + "="*70)
-    print("  PASO 3: VENTANADO (WINDOWING)")
+    print("  STEP 3: WINDOWING")
     print("="*70 + "\n")
     
     start_time = time.time()
@@ -327,7 +327,7 @@ def run_window():
         all_windows = []
         sessions = df['idSession'].unique()
         
-        print(f"  [{set_name.upper()}] Ventanando {len(sessions)} sesiones...")
+        print(f"  [{set_name.upper()}] Windowing {len(sessions)} sessions...")
         for session_id in tqdm(sessions, desc=f"  {set_name.upper()}", leave=False):
             session_df = df[df['idSession'] == session_id].reset_index(drop=True)
             max_start = len(session_df) - window_size
@@ -339,21 +339,21 @@ def run_window():
         if all_windows:
             result = pd.concat(all_windows, ignore_index=True)
             result.to_csv(os.path.join(out_dir, f"dataset_windowed_{set_name}.csv"), index=False)
-            print(f"  [{set_name.upper()}] ✓ {len(result)} filas guardadas")
+            print(f"  [{set_name.upper()}] {len(result)} rows saved")
 
-    # Parámetros
+    # Parameters
     input_dir = os.path.join("data", "processed", "dataset_clipped")
     sampling_rate = 100
     window_seconds = 10
     window_size = sampling_rate * window_seconds
     overlap = 0.25
 
-    print(f"  Parámetros:")
-    print(f"    - Duración ventana: {window_seconds}s ({window_size} muestras)")
+    print(f"  Parameters:")
+    print(f"    - Window duration: {window_seconds}s ({window_size} samples)")
     print(f"    - Overlap: {overlap*100}%")
-    print(f"    - Step: {int(window_size * (1 - overlap))} muestras\n")
+    print(f"    - Step: {int(window_size * (1 - overlap))} samples\n")
 
-    # Leer y procesar datasets
+    # Read and process datasets
     datasets = {
         "train": pd.read_csv(os.path.join(input_dir, "train.csv")),
         "val": pd.read_csv(os.path.join(input_dir, "val.csv")),
@@ -364,14 +364,14 @@ def run_window():
         window_and_save(df, set_name, window_size=window_size, overlap=overlap)
 
     elapsed_time = time.time() - start_time
-    print(f"\n✓ Ventanado completado en {elapsed_time:.2f} segundos")
-    print(f"  Archivos guardados en: data/processed/windowed/\n")
+    print(f"\nWindowing completed in {elapsed_time:.2f} seconds")
+    print(f"  Files saved to: data/processed/windowed/\n")
 
 
 def run_all():
-    """Ejecuta todo el pipeline completo"""
+    """Executes the complete pipeline"""
     print("\n" + "="*70)
-    print("  PIPELINE COMPLETO DE PROCESAMIENTO DE DATOS EEG")
+    print("  COMPLETE EEG DATA PROCESSING PIPELINE")
     print("="*70)
     
     total_start = time.time()
@@ -383,12 +383,12 @@ def run_all():
         
         total_time = time.time() - total_start
         print("\n" + "="*70)
-        print("  ✓ PIPELINE COMPLETADO EXITOSAMENTE")
-        print(f"  Tiempo total: {total_time:.2f} segundos ({total_time/60:.2f} minutos)")
+        print("  PIPELINE COMPLETED SUCCESSFULLY")
+        print(f"  Total time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
         print("="*70 + "\n")
         
     except Exception as e:
-        print(f"\n❌ Error en el pipeline: {e}")
+        print(f"\nError in pipeline: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
@@ -411,12 +411,12 @@ Ejemplos de uso:
         '--step',
         choices=['conversion', 'concat', 'window', 'all'],
         default='all',
-        help='Paso específico a ejecutar (default: all)'
+        help='Specific step to execute (default: all)'
     )
     
     args = parser.parse_args()
     
-    # Ejecutar el paso solicitado
+    # Execute requested step
     if args.step == 'all':
         run_all()
     elif args.step == 'conversion':
