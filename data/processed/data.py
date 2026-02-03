@@ -239,6 +239,19 @@ def run_concat():
     output_dir = os.path.join("data", "processed", "dataset_clipped")
     os.makedirs(output_dir, exist_ok=True)
 
+    # Check if files already exist
+    train_path = os.path.join(output_dir, "train.csv")
+    val_path = os.path.join(output_dir, "val.csv")
+    test_path = os.path.join(output_dir, "test.csv")
+    
+    if all(os.path.exists(p) and os.path.getsize(p) > 0 for p in [train_path, val_path, test_path]):
+        print("  Files already exist. Skipping concatenation.")
+        print(f"    - {train_path}")
+        print(f"    - {val_path}")
+        print(f"    - {test_path}")
+        print("\n  Use --step concat to force regeneration.\n")
+        return
+
     channels = ["Time (s)", "Seizure", "idSession", "idPatient",
                 "EEG Fp1", "EEG Fp2", "EEG F7", "EEG F3", "EEG Fz", "EEG F4", "EEG F8",
                 "EEG T3", "EEG C3", "EEG Cz", "EEG C4", "EEG T4", "EEG T5", "EEG P3",
@@ -281,14 +294,32 @@ def run_concat():
 
     print(f"  Total sessions found: {len(session_dfs)}")
 
-    # Split sessions
-    session_ids = list(session_dfs.keys())
-    train_ids, temp_ids = train_test_split(session_ids, test_size=0.3, random_state=42)
-    val_ids, test_ids = train_test_split(temp_ids, test_size=0.5, random_state=42)
+    # Group sessions by patient
+    patient_sessions = {}
+    for session_id, df_session in session_dfs.items():
+        patient_id = df_session["idPatient"].iloc[0]
+        if patient_id not in patient_sessions:
+            patient_sessions[patient_id] = []
+        patient_sessions[patient_id].append(session_id)
+    
+    print(f"  Total patients found: {len(patient_sessions)}")
+    for patient_id, sessions in list(patient_sessions.items())[:3]:
+        print(f"    {patient_id}: {len(sessions)} sessions")
+    
+    # Split by patients (not sessions) to avoid data leakage
+    patient_ids = list(patient_sessions.keys())
+    train_patients, temp_patients = train_test_split(patient_ids, test_size=0.3, random_state=42)
+    val_patients, test_patients = train_test_split(temp_patients, test_size=0.5, random_state=42)
 
-    print(f"  Train: {len(train_ids)} sessions")
-    print(f"  Val:   {len(val_ids)} sessions")
-    print(f"  Test:  {len(test_ids)} sessions")
+    # Get session IDs for each split
+    train_ids = [sid for pid in train_patients for sid in patient_sessions[pid]]
+    val_ids = [sid for pid in val_patients for sid in patient_sessions[pid]]
+    test_ids = [sid for pid in test_patients for sid in patient_sessions[pid]]
+
+    print(f"\n  Split by patients:")
+    print(f"    Train: {len(train_patients)} patients ({len(train_ids)} sessions)")
+    print(f"    Val:   {len(val_patients)} patients ({len(val_ids)} sessions)")
+    print(f"    Test:  {len(test_patients)} patients ({len(test_ids)} sessions)")
 
     # Concatenate and save
     train_df = pd.concat([session_dfs[sid] for sid in train_ids], ignore_index=True)
@@ -343,10 +374,24 @@ def run_window():
 
     # Parameters
     input_dir = os.path.join("data", "processed", "dataset_clipped")
+    output_dir = os.path.join("data", "processed", "windowed")
     sampling_rate = 100
     window_seconds = 10
     window_size = sampling_rate * window_seconds
     overlap = 0.25
+
+    # Check if files already exist
+    train_wind = os.path.join(output_dir, "dataset_windowed_train.csv")
+    val_wind = os.path.join(output_dir, "dataset_windowed_val.csv")
+    test_wind = os.path.join(output_dir, "dataset_windowed_test.csv")
+    
+    if all(os.path.exists(p) and os.path.getsize(p) > 0 for p in [train_wind, val_wind, test_wind]):
+        print("  Files already exist. Skipping windowing.")
+        print(f"    - {train_wind}")
+        print(f"    - {val_wind}")
+        print(f"    - {test_wind}")
+        print("\n  Use --step window to force regeneration.\n")
+        return
 
     print(f"  Parameters:")
     print(f"    - Window duration: {window_seconds}s ({window_size} samples)")
