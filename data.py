@@ -7,12 +7,12 @@ This script executes the entire data preparation process:
 3. Windowing for time series
 
 Usage:
-    python data/processed/data.py
+    python data.py
     
 Or run individual steps:
-    python data/processed/data.py --step conversion
-    python data/processed/data.py --step concat
-    python data/processed/data.py --step window
+    python data.py --step conversion
+    python data.py --step concat
+    python data.py --step window
 """
 
 import argparse
@@ -21,7 +21,7 @@ import time
 import os
 
 # Add root directory to path for imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 
 def run_conversion():
@@ -406,11 +406,11 @@ def run_window():
     }
 
     for set_name, df in datasets.items():
-        window_and_save(df, set_name, window_size=window_size, overlap=overlap)
+        window_and_save(df, set_name, window_size=window_size, overlap=overlap, out_dir=output_dir)
 
     elapsed_time = time.time() - start_time
     print(f"\nWindowing completed in {elapsed_time:.2f} seconds")
-    print(f"  Files saved to: data/processed/windowed/\n")
+    print(f"  Files saved to: {output_dir}\n")
 
 
 def run_all():
@@ -445,10 +445,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos de uso:
-  python data/processed/data.py                 # Ejecutar todo el pipeline
-  python data/processed/data.py --step conversion  # Solo conversión
-  python data/processed/data.py --step concat      # Solo concatenación
-  python data/processed/data.py --step window      # Solo ventanado
+  python data.py                 # Ejecutar todo el pipeline
+  python data.py --step conversion  # Solo conversión
+  python data.py --step concat      # Solo concatenación
+  python data.py --step window      # Solo ventanado
         """
     )
     
