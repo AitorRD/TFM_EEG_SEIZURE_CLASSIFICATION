@@ -1,6 +1,11 @@
 /data/raw/*
 .vscode/
+.venv/
+env/
+
 /images/seizure_timelines/*
+/images/raw_eeg_traces/*
+
 /data/processed/dataset_clipped.csv
 /data/processed/dataset_clipped.zip
 /data/processed/dataset_windowed.csv
@@ -23,5 +28,5 @@
 /data/processed/windowed/*
 /data/processed/dataset_clipped/*
 /data/processed/debug_conversion.py
-.venv/
-env/
+
+
