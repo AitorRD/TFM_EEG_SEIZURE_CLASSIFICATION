@@ -72,7 +72,7 @@ class MLExperiment:
         self.random_state = self.config['experiment']['random_state']
         self.n_jobs = self.config['experiment'].get('n_jobs', -1)
         
-        # Estructuras para almacenar resultados
+        # Structures to store results
         self.X_train = None
         self.y_train = None
         self.X_val = None
@@ -83,11 +83,11 @@ class MLExperiment:
         self.pipelines = {}
         self.results = {}
         
-        # Crear directorios necesarios
+        # Create necessary directories
         self._create_directories()
     
     def _load_config(self, config_path):
-        """Carga el archivo de configuración YAML"""
+        """Loads YAML configuration file"""
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
         print(f"✓ Configuración cargada desde: {config_path}")
@@ -95,7 +95,7 @@ class MLExperiment:
         return config
     
     def _create_directories(self):
-        """Crea los directorios necesarios para resultados"""
+        """Creates necessary directories for results"""
         dirs = [
             Path(self.config['paths']['results']['xai_dir']),
             Path(self.config['paths']['results']['optuna_dir']),
@@ -106,11 +106,11 @@ class MLExperiment:
     
     def extract_tsfresh_features(self, file_path, mode="train"):
         """
-        Extrae características usando TSFRESH
+        Extracts features using TSFRESH
         
         Args:
-            file_path (str): Ruta al archivo CSV con datos de ventanas
-            mode (str): 'train', 'val' o 'test'
+            file_path (str): Path to CSV file with window data
+            mode (str): 'train', 'val' or 'test'
             
         Returns:
             tuple: (features_df, labels_series)
@@ -124,7 +124,7 @@ class MLExperiment:
         signal_cols = [col for col in df_windowed.columns 
                       if col not in ['id', 'Time (s)', 'Seizure', 'idSession', 'idPatient']]
         
-        # Obtener parámetros desde config
+        # Get parameters from config
         custom_fc_parameters = self.config['feature_extraction']['custom_fc_parameters']
         
         features = extract_features(
@@ -136,7 +136,7 @@ class MLExperiment:
             default_fc_parameters=custom_fc_parameters
         )
         
-        # Imputación de valores faltantes
+        # Imputation of missing values
         features = features.replace([np.inf, -np.inf], np.nan)
         imputer = SimpleImputer(strategy='median')
         imputer.fit(features)
@@ -149,7 +149,7 @@ class MLExperiment:
         
         labels = df_windowed.groupby('id')['Seizure'].max()
         
-        # Guardar features y labels
+        # Save features and labels
         features_path = self.config['paths']['features'][mode]
         labels_path = self.config['paths']['labels'][mode]
         features_imputed.to_csv(features_path)
@@ -160,7 +160,7 @@ class MLExperiment:
         return features_imputed, labels
     
     def load_or_extract_features(self):
-        """Carga features desde CSV o las extrae si no existen"""
+        """Loads features from CSV or extracts them if they don't exist"""
         modes = ['train', 'val', 'test']
         datasets = {}
         
@@ -169,7 +169,7 @@ class MLExperiment:
             labels_path = self.config['paths']['labels'][mode]
             data_path = self.config['paths']['data'][mode]
             
-            # Verificar si existen los archivos de features
+            # Check if feature files exist
             if (os.path.exists(features_path) and os.path.exists(labels_path) 
                 and not self.config['feature_extraction']['enabled']):
                 print(f"\n[{mode.upper()}] Cargando features desde CSV...")
@@ -186,7 +186,7 @@ class MLExperiment:
         self.X_test, self.y_test = datasets['test']
     
     def select_features(self):
-        """Selecciona las mejores k características"""
+        """Selects the best k features"""
         if not self.config['feature_selection']['enabled']:
             print("\n[FEATURE SELECTION] Deshabilitada en config")
             self.selected_features = self.X_train.columns
@@ -197,14 +197,26 @@ class MLExperiment:
         
         print(f"\n[FEATURE SELECTION] Seleccionando {k} mejores features...")
         selector = SelectKBest(score_func=f_classif, k=k)
-        X_selected = selector.fit_transform(self.X_train, self.y_train)
-        
+        selector.fit(self.X_train, self.y_train)  
+
+        # Get selected feature names
         self.selected_features = self.X_train.columns[selector.get_support()]
-        self.X_train = pd.DataFrame(X_selected, columns=self.selected_features)
-        self.X_val = self.X_val[self.selected_features]
-        self.X_test = self.X_test[self.selected_features]
+
+        # Apply transformation
+        self.X_train = pd.DataFrame(
+            selector.transform(self.X_train),  
+            columns=self.selected_features
+        )
+        self.X_val = pd.DataFrame(
+            selector.transform(self.X_val),    
+            columns=self.selected_features
+        )
+        self.X_test = pd.DataFrame(
+            selector.transform(self.X_test),   
+            columns=self.selected_features
+        )
         
-        # Guardar features seleccionadas
+        # Save selected features
         selected_path = self.config['paths']['selected_features']
         pd.Series(self.selected_features, name="feature").to_csv(
             selected_path, index=False, header=True
@@ -213,7 +225,7 @@ class MLExperiment:
         print(f"  ✓ Guardadas en: {selected_path}")
     
     def get_enabled_models(self):
-        """Retorna lista de modelos habilitados en la configuración"""
+        """Returns list of enabled models in configuration"""
         enabled = []
         for model_key, model_config in self.config['models'].items():
             if model_config.get('enabled', False):
@@ -222,13 +234,13 @@ class MLExperiment:
     
     def create_default_pipeline(self, model_key):
         """
-        Crea un pipeline con parámetros por defecto para un modelo
+        Creates a pipeline with default parameters for a model
         
         Args:
-            model_key (str): Clave del modelo (lr, rf, svc, knn, xgb)
+            model_key (str): Model key (lr, rf, svc, knn, xgb)
             
         Returns:
-            Pipeline: Pipeline de sklearn
+            Pipeline: sklearn Pipeline
         """
         model_config = self.config['models'][model_key]
         default_params = model_config.get('default_params', {})
@@ -261,7 +273,7 @@ class MLExperiment:
             raise ValueError(f"Modelo no soportado: {model_key}")
     
     def get_enabled_dl_models(self):
-        """Retorna lista de modelos DL habilitados en la configuración"""
+        """Returns list of enabled DL models in configuration"""
         if not PYTORCH_AVAILABLE or not self.config.get('deep_learning', {}).get('enabled', False):
             return []
         
@@ -273,14 +285,14 @@ class MLExperiment:
     
     def create_dl_model(self, model_key, **params):
         """
-        Crea un modelo de DL envuelto en skorch NeuralNetClassifier
+        Creates a DL model wrapped in skorch NeuralNetClassifier
         
         Args:
-            model_key (str): Clave del modelo DL (transformer, cnn, lstm, gru)
-            **params: Parámetros del modelo
+            model_key (str): DL model key (transformer, cnn, lstm, gru)
+            **params: Model parameters
             
         Returns:
-            NeuralNetClassifier: Modelo envuelto en skorch
+            NeuralNetClassifier: Model wrapped in skorch
         """
         if not PYTORCH_AVAILABLE:
             raise ImportError("PyTorch/skorch no está disponible")
@@ -289,24 +301,24 @@ class MLExperiment:
         default_params = model_config.get('default_params', {})
         dl_config = self.config['deep_learning']
         
-        # Combinar parámetros
+        # Combine parameters
         model_params = {**default_params, **params}
         
-        # Seleccionar arquitectura
+        # Select architecture
         if model_key == "transformer":
             module = EEGTransformer
         elif model_key == "cnn":
             module = CNN1DClassifier
-            # Para CNN, necesitamos el número de features
+            # For CNN, we need the number of features
             model_params['input_features'] = self.X_train.shape[1] if self.X_train is not None else 50
         elif model_key == "lstm":
             module = LSTMClassifier
         elif model_key == "gru":
             module = GRUClassifier
         else:
-            raise ValueError(f"Modelo DL no soportado: {model_key}")
+            raise ValueError(f"DL Model not supported: {model_key}")
         
-        # Calcular class weights
+        # Calculate class weights
         if self.y_train is not None:
             y_train_np = self.y_train.values if hasattr(self.y_train, 'values') else self.y_train
             class_weights = compute_class_weight('balanced', classes=np.unique(y_train_np), y=y_train_np)
@@ -314,7 +326,7 @@ class MLExperiment:
         else:
             class_weights_tensor = None
         
-        # Configurar callbacks
+        # Configure callbacks
         callbacks = []
         
         # Early Stopping
@@ -340,16 +352,16 @@ class MLExperiment:
                     )
                 )
         
-        # Determinar device
+        # Determine device
         device = self.config['experiment'].get('device', 'cuda')
         if device == 'cuda' and not torch.cuda.is_available():
             device = 'cpu'
-            print("  ⚠ CUDA no disponible, usando CPU")
+            print("  ⚠ CUDA not available, using CPU")
         
-        # Preparar parámetros del módulo (filtrar lr y weight_decay que van al optimizer)
+        # Prepare module parameters (filter lr and weight_decay that go to optimizer)
         module_params = {k: v for k, v in model_params.items() if k not in ['lr', 'weight_decay']}
         
-        # Crear kwargs para NeuralNetClassifier
+        # Create kwargs for NeuralNetClassifier
         net_kwargs = {
             'module': module,
             'max_epochs': dl_config['epochs'],
@@ -364,29 +376,29 @@ class MLExperiment:
             'verbose': 1
         }
         
-        # Agregar parámetros del módulo con prefijo module__
+        # Add module parameters with module__ prefix
         for key, value in module_params.items():
             net_kwargs[f'module__{key}'] = value
         
-        # Agregar class weights si existen
+        # Add class weights if they exist
         if class_weights_tensor is not None:
             net_kwargs['criterion__weight'] = class_weights_tensor
         
-        # Crear NeuralNetClassifier
+        # Create NeuralNetClassifier
         net = NeuralNetClassifier(**net_kwargs)
         
         return net
     
     def create_dl_pipeline(self, model_key, **params):
         """
-        Crea un pipeline que incluye preprocesamiento y modelo DL
+        Creates a pipeline that includes preprocessing and DL model
         
         Args:
-            model_key (str): Clave del modelo DL
-            **params: Parámetros del modelo
+            model_key (str): DL model key
+            **params: Model parameters
             
         Returns:
-            Pipeline: Pipeline con preprocesamiento y modelo DL
+            Pipeline: Pipeline with preprocessing and DL model
         """
         # Para CNN que trabaja con features, agregar scaler
         if model_key == "cnn":
@@ -395,15 +407,15 @@ class MLExperiment:
                 (model_key, self.create_dl_model(model_key, **params))
             ])
         else:
-            # Transformer, LSTM, GRU trabajan con datos raw (no necesitan scaler)
+            # Transformer, LSTM, GRU work with raw data (no scaler needed)
             return Pipeline([
                 (model_key, self.create_dl_model(model_key, **params))
             ])
     
     def load_dl_data(self):
         """
-        Carga datos en formato apropiado para DL
-        Retorna datasets de PyTorch según el formato configurado
+        Loads data in appropriate format for DL
+        Returns PyTorch datasets according to configured format
         """
         if not PYTORCH_AVAILABLE:
             raise ImportError("PyTorch no está disponible")
@@ -412,8 +424,8 @@ class MLExperiment:
         data_format = dl_config.get('data_format', 'features')
         
         if data_format == 'raw':
-            # Cargar ventanas raw para Transformer/LSTM/GRU
-            print("\n[DL] Cargando datos raw (ventanas EEG)...")
+            # Load raw windows for Transformer/LSTM/GRU
+            print("\n[DL] Loading raw data (EEG windows)...")
             
             train_df = pd.read_csv(self.config['paths']['data']['train'])
             val_df = pd.read_csv(self.config['paths']['data']['val'])
@@ -435,7 +447,7 @@ class MLExperiment:
                 seq_len=dl_config['sequence_length']
             )
             
-            # Para skorch, necesitamos X, y en formato numpy
+            # For skorch, we need X, y in numpy format
             self.X_train = train_dataset.data.numpy()
             self.y_train = train_dataset.labels.numpy()
             self.X_val = val_dataset.data.numpy()
@@ -448,16 +460,16 @@ class MLExperiment:
             print(f"  Test shape: {self.X_test.shape}")
             
         elif data_format == 'features':
-            # Usar features ya extraídas (para CNN sobre features)
-            print("\n[DL] Usando features extraídas...")
-            # X_train, X_val, X_test ya están cargados por load_or_extract_features
+            # Use already extracted features (for CNN on features)
+            print("\n[DL] Using extracted features...")
+            # X_train, X_val, X_test already loaded by load_or_extract_features
             pass
         
         else:
-            raise ValueError(f"Formato de datos no soportado: {data_format}")
+            raise ValueError(f"Data format not supported: {data_format}")
     
     def cross_validate_models(self):
-        """Realiza validación cruzada en todos los modelos habilitados"""
+        """Performs cross-validation on all enabled models"""
         if not self.config['cross_validation']['enabled']:
             print("\n[CROSS VALIDATION] Deshabilitada en config")
             return None
@@ -510,13 +522,13 @@ class MLExperiment:
     
     def create_optuna_objective(self, model_key):
         """
-        Crea función objetivo para optimización con Optuna
+        Creates objective function for Optuna optimization
         
         Args:
-            model_key (str): Clave del modelo a optimizar
+            model_key (str): Model key to optimize
             
         Returns:
-            callable: Función objetivo para Optuna
+            callable: Objective function for Optuna
         """
         model_config = self.config['models'][model_key]
         search_space = model_config['optuna_search_space']
@@ -594,10 +606,10 @@ class MLExperiment:
     
     def optimize_with_optuna(self, model_key):
         """
-        Optimiza hiperparámetros usando Optuna
+        Optimizes hyperparameters using Optuna
         
         Args:
-            model_key (str): Clave del modelo a optimizar
+            model_key (str): Model key to optimize
             
         Returns:
             tuple: (best_params, best_pipeline, study)
@@ -612,7 +624,7 @@ class MLExperiment:
         
         objective = self.create_optuna_objective(model_key)
         
-        # Crear estudio
+        # Create study
         study = optuna.create_study(
             direction='maximize',
             sampler=TPESampler(seed=self.random_state),
@@ -623,7 +635,7 @@ class MLExperiment:
             study_name=f'{model_key}_optimization'
         )
         
-        # Optimizar
+        # Optimize
         study.optimize(
             objective,
             n_trials=optuna_config['n_trials'],
@@ -631,10 +643,10 @@ class MLExperiment:
             show_progress_bar=optuna_config['show_progress_bar']
         )
         
-        print(f"\n✓ Optimización completada!")
-        print(f"  → Mejor Score (CV): {study.best_value:.4f}")
+        print(f"\n✓ Optimization completed!")
+        print(f"  → Best Score (CV): {study.best_value:.4f}")
         print(f"  → Trial #: {study.best_trial.number}")
-        print(f"  → Mejores hiperparámetros:")
+        print(f"  → Best hyperparameters:")
         for param, value in study.best_params.items():
             print(f"      {param}: {value}")
         
@@ -643,25 +655,28 @@ class MLExperiment:
         optuna_dir = Path(self.config['paths']['results']['optuna_dir'])
         trials_path = optuna_dir / f"optuna_results_{model_key}.csv"
         trials_df.to_csv(trials_path, index=False)
-        print(f"\n  → Resultados guardados: {trials_path}")
+        print(f"\n  → Results saved: {trials_path}")
         
-        # Guardar visualizaciones
-        try:
-            import optuna.visualization as vis
-            
-            fig1 = vis.plot_optimization_history(study)
-            fig2 = vis.plot_param_importances(study)
-            fig3 = vis.plot_slice(study)
-            
-            results_dir = Path(self.config['paths']['results']['metrics']).parent
-            fig1.write_html(results_dir / f"optuna_history_{model_key}.html")
-            fig2.write_html(results_dir / f"optuna_importance_{model_key}.html")
-            fig3.write_html(results_dir / f"optuna_slice_{model_key}.html")
-            print(f"  → Visualizaciones guardadas en {results_dir}/\n")
-        except ImportError:
-            print(f"  (Instala plotly para visualizaciones: pip install plotly)\n")
+        # Save visualizations (optional)
+        if self.config['optuna'].get('save_visualizations', False):
+            try:
+                import optuna.visualization as vis
+                
+                fig1 = vis.plot_optimization_history(study)
+                fig2 = vis.plot_param_importances(study)
+                fig3 = vis.plot_slice(study)
+                
+                results_dir = Path(self.config['paths']['results']['metrics']).parent
+                fig1.write_html(results_dir / f"optuna_history_{model_key}.html")
+                fig2.write_html(results_dir / f"optuna_importance_{model_key}.html")
+                fig3.write_html(results_dir / f"optuna_slice_{model_key}.html")
+                print(f"  → Visualizations saved in {results_dir}/\n")
+            except ImportError:
+                print(f"  (Install plotly for visualizations: pip install plotly)\n")
+        else:
+            print(f"  (Visualizations disabled in config)\n")
         
-        # Crear pipeline con mejores parámetros
+        # Create pipeline with best parameters
         best_params = study.best_params
         model_config = self.config['models'][model_key]
         default_params = model_config.get('default_params', {})
@@ -696,7 +711,7 @@ class MLExperiment:
         return best_params, best_pipeline, study
     
     def train_models(self):
-        """Entrena todos los modelos habilitados (ML y DL, con o sin optimización)"""
+        """Trains all enabled models (ML and DL, with or without optimization)"""
         # Determinar tipo de experimento
         experiment_type = self.config['experiment'].get('type', 'ml')
         
@@ -705,7 +720,7 @@ class MLExperiment:
         print(f"{'='*60}\n")
         
         if experiment_type == 'ml' or not self.config.get('deep_learning', {}).get('enabled', False):
-            # Entrenar modelos ML tradicionales
+            # Train traditional ML models
             enabled_models = self.get_enabled_models()
             
             for model_key in enabled_models:
@@ -713,26 +728,26 @@ class MLExperiment:
                 print(f"\nEntrenando: {model_name}")
                 
                 if self.config['optuna']['enabled']:
-                    # Optimizar con Optuna
+                    # Optimize with Optuna
                     best_params, pipeline, study = self.optimize_with_optuna(model_key)
                     self.pipelines[model_key] = pipeline
                 else:
-                    # Usar parámetros por defecto
+                    # Use default parameters
                     pipeline = self.create_default_pipeline(model_key)
                     pipeline.fit(self.X_train, self.y_train)
                     self.pipelines[model_key] = pipeline
-                    print(f"  ✓ Entrenado con parámetros por defecto")
+                    print(f"  ✓ Trained with default parameters")
         
         elif experiment_type == 'dl':
-            # Entrenar modelos DL
+            # Train DL models
             if not PYTORCH_AVAILABLE:
-                print("  ⚠ PyTorch/skorch no disponible. No se pueden entrenar modelos DL.")
+                print("  ⚠ PyTorch/skorch not available. Cannot train DL models.")
                 return
             
             enabled_dl_models = self.get_enabled_dl_models()
             
             if not enabled_dl_models:
-                print("  ⚠ No hay modelos DL habilitados en la configuración.")
+                print("  ⚠ No DL models enabled in configuration.")
                 return
             
             for model_key in enabled_dl_models:
@@ -740,15 +755,15 @@ class MLExperiment:
                 print(f"\nEntrenando: {model_name}")
                 
                 if self.config['optuna']['enabled']:
-                    # Optimizar hiperparámetros DL con Optuna
+                    # Optimize DL hyperparameters with Optuna
                     best_params, pipeline, study = self.optimize_dl_with_optuna(model_key)
                     self.pipelines[model_key] = pipeline
                 else:
-                    # Usar parámetros por defecto
+                    # Use default parameters
                     pipeline = self.create_dl_pipeline(model_key)
                     
-                    # Preparar datos para validación en skorch
-                    # Convertir a numpy/float32 si es necesario
+                    # Prepare data for validation in skorch
+                    # Convert to numpy/float32 if necessary
                     if hasattr(self.X_train, 'values'):
                         X_train_np = self.X_train.values.astype(np.float32)
                         y_train_np = self.y_train.values.astype(np.int64)
@@ -763,20 +778,20 @@ class MLExperiment:
                         X_val_np = self.X_val.astype(np.float32)
                         y_val_np = self.y_val.astype(np.int64)
                     
-                    # Fit con validación
+                    # Fit with validation
                     pipeline.fit(X_train_np, y_train_np,
                                **{f'{model_key}__X_valid': X_val_np,
                                   f'{model_key}__y_valid': y_val_np})
                     
                     self.pipelines[model_key] = pipeline
-                    print(f"  ✓ Entrenado con parámetros por defecto")
+                    print(f"  ✓ Trained with default parameters")
     
     def optimize_dl_with_optuna(self, model_key):
         """
-        Optimiza hiperparámetros de un modelo DL usando Optuna
+        Optimizes hyperparameters of a DL model using Optuna
         
         Args:
-            model_key (str): Clave del modelo DL (transformer, cnn, lstm, gru)
+            model_key (str): DL model key (transformer, cnn, lstm, gru)
             
         Returns:
             tuple: (best_params, best_pipeline, study)
@@ -874,19 +889,22 @@ class MLExperiment:
         trials_df.to_csv(trials_path, index=False)
         print(f"\n  → Resultados guardados: {trials_path}")
         
-        # Visualizaciones
-        try:
-            import optuna.visualization as vis
-            results_dir = Path(self.config['paths']['results']['metrics']).parent
-            fig1 = vis.plot_optimization_history(study)
-            fig2 = vis.plot_param_importances(study)
-            fig3 = vis.plot_slice(study)
-            fig1.write_html(results_dir / f"optuna_dl_history_{model_key}.html")
-            fig2.write_html(results_dir / f"optuna_dl_importance_{model_key}.html")
-            fig3.write_html(results_dir / f"optuna_dl_slice_{model_key}.html")
-            print(f"  → Visualizaciones guardadas en {results_dir}/\n")
-        except ImportError:
-            print(f"  (Instala plotly para visualizaciones)\n")
+        # Visualizaciones (opcional)
+        if self.config['optuna'].get('save_visualizations', False):
+            try:
+                import optuna.visualization as vis
+                results_dir = Path(self.config['paths']['results']['metrics']).parent
+                fig1 = vis.plot_optimization_history(study)
+                fig2 = vis.plot_param_importances(study)
+                fig3 = vis.plot_slice(study)
+                fig1.write_html(results_dir / f"optuna_dl_history_{model_key}.html")
+                fig2.write_html(results_dir / f"optuna_dl_importance_{model_key}.html")
+                fig3.write_html(results_dir / f"optuna_dl_slice_{model_key}.html")
+                print(f"  → Visualizaciones guardadas en {results_dir}/\n")
+            except ImportError:
+                print(f"  (Instala plotly para visualizaciones)\n")
+        else:
+            print(f"  (Visualizaciones desactivadas en config)\n")
         
         # Entrenar modelo final con mejores parámetros
         best_pipeline = self.create_dl_pipeline(model_key, **study.best_params)
@@ -912,7 +930,7 @@ class MLExperiment:
         return study.best_params, best_pipeline, study
     
     def evaluate_on_validation(self):
-        """Evalúa todos los modelos en el conjunto de validación"""
+        """Evaluates all models on validation set"""
         print(f"\n{'='*60}")
         print(f"  EVALUACIÓN EN VALIDACIÓN")
         print(f"{'='*60}\n")
@@ -953,7 +971,7 @@ class MLExperiment:
             print(f"  F1 Score:  {metrics['f1']:.4f}")
             print(f"  F1 Macro:  {metrics['f1_macro']:.4f}\n")
         
-        # Encontrar mejor modelo
+        # Find best model
         best_model = max(val_results, key=lambda x: val_results[x]['f1_macro'])
         if best_model in self.config.get('models', {}):
             best_name = self.config['models'][best_model]['name']
@@ -961,12 +979,12 @@ class MLExperiment:
             best_name = self.config['dl_models'][best_model]['name']
         else:
             best_name = best_model
-        print(f"🏆 Mejor modelo en validación: {best_name}\n")
+        print(f"🏆 Best model on validation: {best_name}\n")
         
         return val_results, best_model
     
     def evaluate_on_test(self):
-        """Evalúa todos los modelos en el conjunto de test"""
+        """Evaluates all models on test set"""
         print(f"\n{'='*60}")
         print(f"  EVALUACIÓN EN TEST")
         print(f"{'='*60}\n")
@@ -1016,15 +1034,19 @@ class MLExperiment:
         return test_results
     
     def plot_and_save_metrics(self, results_dict):
-        """Guarda tabla de métricas como imagen"""
+        """Saves metrics table as image"""
         save_path = self.config['paths']['results']['metrics']
         
         df = pd.DataFrame(results_dict).T
+        
+        # Format values to 4 decimals
+        df_formatted = df.applymap(lambda x: f"{x:.4f}" if isinstance(x, (int, float)) and x is not None else x)
+        
         fig, ax = plt.subplots(figsize=(10, len(df) * 0.6 + 1))
         ax.axis("off")
         
         table = ax.table(
-            cellText=df.values,
+            cellText=df_formatted.values,
             colLabels=df.columns,
             rowLabels=df.index,
             loc='center',
@@ -1040,10 +1062,10 @@ class MLExperiment:
         plt.savefig(save_path, bbox_inches="tight", dpi=300)
         plt.close()
         
-        print(f"✓ Tabla de métricas guardada: {save_path}\n")
+        print(f"✓ Metrics table saved: {save_path}\n")
     
     def generate_xai_explanations(self):
-        """Genera explicaciones XAI (SHAP y LIME) para todos los modelos"""
+        """Generates XAI explanations (SHAP and LIME) for all models"""
         if not self.config['xai']['enabled']:
             print("\n[XAI] Deshabilitado en config")
             return
@@ -1102,17 +1124,17 @@ class MLExperiment:
     def _generate_shap_plot(self, model_key, model_name, pipeline, 
                            X_train_scaled, X_test_scaled, feature_names,
                            save_dir, shap_config):
-        """Genera gráfico de importancia SHAP"""
+        """Generates SHAP importance plot"""
         background_samples = shap_config['background_samples']
         top_features = shap_config['top_features']
         
         background_data = X_train_scaled[:min(background_samples, len(X_train_scaled))]
         
-        # Usar KernelExplainer
+        # Use KernelExplainer
         explainer = shap.KernelExplainer(pipeline.predict_proba, background_data)
         shap_values = explainer.shap_values(X_test_scaled)
         
-        # Media de valores absolutos SHAP para clase positiva
+        # Mean of absolute SHAP values for positive class
         mean_abs_shap = np.abs(shap_values[1]).mean(axis=0)
         importances = pd.Series(mean_abs_shap, index=feature_names)
         importances = importances.sort_values(ascending=False).head(top_features)
@@ -1134,7 +1156,7 @@ class MLExperiment:
     def _generate_lime_plot(self, model_key, model_name, pipeline,
                            X_train_scaled, X_test_scaled, feature_names,
                            save_dir, lime_config):
-        """Genera gráfico de importancia LIME"""
+        """Generates LIME importance plot"""
         n_samples = lime_config['n_samples']
         top_features = lime_config['top_features']
         
@@ -1150,7 +1172,7 @@ class MLExperiment:
             discretize_continuous=lime_config['discretize_continuous']
         )
         
-        # Calcular importancias promedio
+        # Calculate average importances
         all_lime_importances = []
         num_samples = min(n_samples, len(X_test_scaled))
         
@@ -1171,7 +1193,7 @@ class MLExperiment:
             print(f"  [ERROR] No se generaron explicaciones LIME")
             return
         
-        # Promedio de importancias
+        # Average importances
         avg_abs_lime = pd.concat(all_lime_importances, axis=1).abs().mean(axis=1)
         lime_series = avg_abs_lime.sort_values(ascending=False).head(top_features)
         
@@ -1190,7 +1212,7 @@ class MLExperiment:
         print(f"  ✓ LIME guardado: {plot_path}")
     
     def run(self):
-        """Ejecuta el pipeline completo del experimento (ML o DL)"""
+        """Executes the complete experiment pipeline (ML or DL)"""
         print("\n" + "="*60)
         print(f"  INICIANDO EXPERIMENTO: {self.config['experiment']['name']}")
         experiment_type = self.config['experiment'].get('type', 'ml')

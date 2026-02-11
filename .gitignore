@@ -29,4 +29,7 @@ env/
 /data/processed/dataset_clipped/*
 /data/processed/debug_conversion.py
 
-
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc

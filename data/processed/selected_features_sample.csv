@@ -1,0 +1,11 @@
+feature
+EEG Fp1__variance
+EEG Fp1__maximum
+EEG Fp2__variance
+EEG T3__maximum
+EEG C3__variance
+EEG C3__maximum
+EEG O1__variance
+EEG O1__maximum
+EEG O2__variance
+EEG O2__maximum

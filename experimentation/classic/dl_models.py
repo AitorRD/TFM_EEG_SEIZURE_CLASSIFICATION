@@ -47,7 +47,7 @@ class EEGTransformer(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    """Positional Encoding para Transformer"""
+    """Positional Encoding for Transformer"""
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
@@ -88,7 +88,7 @@ class CNN1DClassifier(nn.Module):
         self.bn2 = nn.BatchNorm1d(conv2_channels)
         self.pool2 = nn.MaxPool1d(kernel_size=2)
         
-        # Calcular tamaño después de convoluciones
+        # Calculate size after convolutions
         self.fc1_input_features = self._get_conv_output_size(input_features, 
                                                               conv1_channels, 
                                                               conv2_channels)
@@ -115,7 +115,7 @@ class CNN1DClassifier(nn.Module):
         return x
 
     def _get_conv_output_size(self, input_length, conv1_ch, conv2_ch):
-        """Calcula el tamaño de salida después de convoluciones"""
+        """Calculates output size after convolutions"""
         dummy_input = torch.rand(1, 1, input_length)
         x = self.pool1(F.relu(self.conv1(dummy_input)))
         x = self.pool2(F.relu(self.conv2(x)))
@@ -155,9 +155,9 @@ class LSTMClassifier(nn.Module):
         # x: (B, T, C)
         lstm_out, (h_n, c_n) = self.lstm(x)
         
-        # Usar el último hidden state
+        # Use the last hidden state
         if self.lstm.bidirectional:
-            # Concatenar forward y backward del último layer
+            # Concatenate forward and backward from last layer
             hidden = torch.cat((h_n[-2], h_n[-1]), dim=1)
         else:
             hidden = h_n[-1]
@@ -199,9 +199,9 @@ class GRUClassifier(nn.Module):
         # x: (B, T, C)
         gru_out, h_n = self.gru(x)
         
-        # Usar el último hidden state
+        # Use the last hidden state
         if self.gru.bidirectional:
-            # Concatenar forward y backward del último layer
+            # Concatenate forward and backward from last layer
             hidden = torch.cat((h_n[-2], h_n[-1]), dim=1)
         else:
             hidden = h_n[-1]
@@ -211,15 +211,15 @@ class GRUClassifier(nn.Module):
 
 
 # ============================================================
-# Dataset personalizado para DL
+# Custom dataset for DL
 # ============================================================
 
 from torch.utils.data import Dataset
 
 class EEGWindowDataset(Dataset):
     """
-    Dataset para ventanas de EEG
-    Para modelos que trabajan con datos raw (Transformer, LSTM, GRU)
+    Dataset for EEG windows
+    For models working with raw data (Transformer, LSTM, GRU)
     """
     def __init__(self, df, n_channels=19, seq_len=3000):
         self.data = []
@@ -227,11 +227,11 @@ class EEGWindowDataset(Dataset):
         
         grouped = df.groupby("window_id")
         for window_id, group in grouped:
-            # Columnas de canales EEG (ajustar según tu CSV)
+            # EEG channel columns (adjust according to your CSV)
             X = group.iloc[:, 4:4 + n_channels].values  # (T, C)
             y = group["Seizure"].values[0]
             
-            if X.shape[0] == seq_len:  # Verificar longitud
+            if X.shape[0] == seq_len:  # Verify length
                 self.data.append(X)
                 self.labels.append(y)
         
@@ -247,8 +247,8 @@ class EEGWindowDataset(Dataset):
 
 class EEGFeaturesDataset(Dataset):
     """
-    Dataset para features extraídas (TSFRESH)
-    Para modelos que trabajan con features (CNN 1D sobre features)
+    Dataset for extracted features (TSFRESH)
+    For models working with features (1D CNN on features)
     """
     def __init__(self, X, y):
         """

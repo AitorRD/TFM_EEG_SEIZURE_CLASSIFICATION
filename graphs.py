@@ -125,7 +125,7 @@ def plot_raw_eeg_traces(df, file_name, save_dir, duration_minutes=3):
     
     for i, channel in enumerate(available_channels):
         axes[i].plot(df_window["Time (s)"], df_window[channel], color='black', linewidth=0.5)
-        axes[i].set_ylabel(channel.replace("EEG ", ""), fontsize=10)
+        axes[i].set_ylabel(f"{channel.replace('EEG ', '')} (µV)", fontsize=10)
         axes[i].grid(True, alpha=0.3)
         
         # Mark seizure onset

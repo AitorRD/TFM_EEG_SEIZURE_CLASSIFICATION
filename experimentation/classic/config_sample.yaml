@@ -1,0 +1,151 @@
+# ============================================================
+# CONFIGURACIÓN DE PRUEBA - PIPELINE RÁPIDO
+# Solo 1 modelo con pocas iteraciones para validar funcionamiento
+# ============================================================
+
+experiment:
+  name: "sample_pipeline_quick"
+  type: "ml"
+  random_state: 42
+  n_jobs: 2  # Solo 2 cores para no saturar
+  device: "cpu"
+
+paths:
+  data:
+    train: "data/processed/windowed/dataset_windowed_train.csv"
+    val: "data/processed/windowed/dataset_windowed_val.csv"
+    test: "data/processed/windowed/dataset_windowed_test.csv"
+  features:
+    train: "data/processed/features_train_sample.csv"
+    val: "data/processed/features_val_sample.csv"
+    test: "data/processed/features_test_sample.csv"
+  labels:
+    train: "data/processed/labels_train_sample.csv"
+    val: "data/processed/labels_val_sample.csv"
+    test: "data/processed/labels_test_sample.csv"
+  selected_features: "data/processed/selected_features_sample.csv"
+  results:
+    metrics: "images/results/sample_metrics.png"
+    xai_dir: "images/xai/sample"
+    optuna_dir: "data/processed/optuna_sample"
+
+# ============================================================
+# EXTRACCIÓN DE FEATURES - CONFIGURACIÓN MÍNIMA
+# ============================================================
+feature_extraction:
+  enabled: true  # Cambia a false si ya has extraído features antes
+  custom_fc_parameters:
+    # Solo 3 features simples para ser rápido
+    mean: null
+    variance: null
+    maximum: null
+
+# ============================================================
+# SELECCIÓN DE FEATURES - REDUCIDO
+# ============================================================
+feature_selection:
+  enabled: true
+  method: "SelectKBest"
+  k: 10  # Solo 10 features (muy reducido para prueba rápida)
+
+# ============================================================
+# VALIDACIÓN CRUZADA - DESACTIVADA
+# ============================================================
+cross_validation:
+  enabled: false  # Desactivado para ser más rápido
+  n_folds: 3
+  shuffle: true
+  scoring: "f1_weighted"
+
+# ============================================================
+# OPTIMIZACIÓN OPTUNA - MÍNIMA
+# ============================================================
+optuna:
+  enabled: true
+  n_trials: 3  # Solo 3 trials para probar rápido
+  timeout: 120  # Máximo 2 minutos
+  n_startup_trials: 1
+  n_warmup_steps: 1
+  pruner: "median"
+  show_progress_bar: true
+
+# ============================================================
+# MODELOS - SOLO LOGISTIC REGRESSION (EL MÁS RÁPIDO)
+# ============================================================
+models:
+  lr:
+    name: "Logistic Regression"
+    enabled: true
+    default_params:
+      max_iter: 500  # Reducido
+      class_weight: "balanced"
+    optuna_search_space:
+      C:
+        type: "loguniform"
+        low: 0.01
+        high: 10
+      solver:
+        type: "categorical"
+        choices: ["lbfgs", "liblinear"]
+
+  rf:
+    name: "Random Forest"
+    enabled: false  # DESACTIVADO
+    default_params: {}
+    optuna_search_space: {}
+
+  svc:
+    name: "Support Vector Classifier"
+    enabled: false  # DESACTIVADO
+    default_params: {}
+    optuna_search_space: {}
+
+  knn:
+    name: "K-Nearest Neighbors"
+    enabled: false  # DESACTIVADO
+    default_params: {}
+    optuna_search_space: {}
+
+  xgb:
+    name: "XGBoost"
+    enabled: false  # DESACTIVADO
+    default_params: {}
+    optuna_search_space: {}
+
+# ============================================================
+# XAI - DESACTIVADO
+# ============================================================
+xai:
+  enabled: false  # Desactivado para ser más rápido
+  methods:
+    shap:
+      enabled: false
+      background_samples: 50
+      top_features: 5
+    lime:
+      enabled: false
+      n_samples: 10
+      top_features: 5
+      discretize_continuous: true
+
+# ============================================================
+# MÉTRICAS A REPORTAR
+# ============================================================
+metrics:
+  - accuracy
+  - precision
+  - recall
+  - f1_score
+  - f1_macro
+
+# ============================================================
+# DEEP LEARNING - DESACTIVADO
+# ============================================================
+deep_learning:
+  enabled: false
+  epochs: 10
+  batch_size: 32
+  early_stopping:
+    enabled: false
+  lr_scheduler:
+    enabled: false
