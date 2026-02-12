@@ -15,6 +15,8 @@ import shap
 import lime
 import lime.lime_tabular
 from pathlib import Path
+import time
+from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -70,7 +72,13 @@ class MLExperiment:
         """
         self.config = self._load_config(config_path)
         self.random_state = self.config['experiment']['random_state']
-        self.n_jobs = self.config['experiment'].get('n_jobs', -1)
+        
+        # Fix n_jobs for Windows compatibility with multiprocessing
+        n_jobs_config = self.config['experiment'].get('n_jobs', -1)
+        if n_jobs_config == -1:
+            self.n_jobs = multiprocessing.cpu_count()
+        else:
+            self.n_jobs = max(1, n_jobs_config)  # Ensure at least 1
         
         # Structures to store results
         self.X_train = None
@@ -184,6 +192,13 @@ class MLExperiment:
         self.X_train, self.y_train = datasets['train']
         self.X_val, self.y_val = datasets['val']
         self.X_test, self.y_test = datasets['test']
+        
+        # Ensure all datasets have the same columns in the same order
+        common_cols = self.X_train.columns.intersection(self.X_val.columns).intersection(self.X_test.columns)
+        self.X_train = self.X_train[common_cols]
+        self.X_val = self.X_val[common_cols]
+        self.X_test = self.X_test[common_cols]
+        print(f"\n[INFO] Columnas comunes alineadas: {len(common_cols)} features")
     
     def select_features(self):
         """Selects the best k features"""
@@ -243,8 +258,11 @@ class MLExperiment:
             Pipeline: sklearn Pipeline
         """
         model_config = self.config['models'][model_key]
-        default_params = model_config.get('default_params', {})
-        default_params['random_state'] = self.random_state
+        default_params = model_config.get('default_params', {}).copy()
+        
+        # KNN doesn't accept random_state, so we handle it separately
+        if model_key != "knn":
+            default_params['random_state'] = self.random_state
         
         if model_key == "lr":
             return Pipeline([
@@ -267,7 +285,7 @@ class MLExperiment:
             ])
         elif model_key == "xgb":
             return Pipeline([
-                ('xgb', xgb.XGBClassifier(**default_params, random_state=self.random_state))
+                ('xgb', xgb.XGBClassifier(**default_params))
             ])
         else:
             raise ValueError(f"Modelo no soportado: {model_key}")
@@ -1213,10 +1231,14 @@ class MLExperiment:
     
     def run(self):
         """Executes the complete experiment pipeline (ML or DL)"""
+        start_time = time.time()
+        start_datetime = datetime.now()
+        
         print("\n" + "="*60)
         print(f"  INICIANDO EXPERIMENTO: {self.config['experiment']['name']}")
         experiment_type = self.config['experiment'].get('type', 'ml')
         print(f"  Tipo: {experiment_type.upper()}")
+        print(f"  Fecha y hora: {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*60 + "\n")
         
         # Determinar flujo según tipo de experimento
@@ -1283,8 +1305,23 @@ class MLExperiment:
             # 8. Generar explicaciones XAI
             self.generate_xai_explanations()
         
+        # Calcular tiempo total
+        end_time = time.time()
+        end_datetime = datetime.now()
+        duration_seconds = end_time - start_time
+        duration_timedelta = timedelta(seconds=duration_seconds)
+        
+        # Formatear tiempo
+        hours, remainder = divmod(duration_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
         print("\n" + "="*60)
         print("  EXPERIMENTO COMPLETADO")
+        print("="*60)
+        print(f"  Inicio: {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  Fin:    {end_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  Duración total: {int(hours)}h {int(minutes)}m {int(seconds)}s")
+        print(f"  Duración total: {duration_timedelta}")
         print("="*60 + "\n")
 
 

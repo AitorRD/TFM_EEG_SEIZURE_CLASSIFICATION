@@ -7,7 +7,7 @@
 # CONFIGURACIÓN GENERAL
 # ============================================================
 experiment:
-  name: "eeg_seizure_experiment"
+  name: "eeg_seizure_experiment_full"
   type: "ml"  # CAMBIAR A: 'ml' para Machine Learning tradicional o 'dl' para Deep Learning
   random_state: 42
   n_jobs: -1  # -1 = usar todos los cores disponibles (para ML)
@@ -78,13 +78,13 @@ cross_validation:
 # ============================================================
 optuna:
   enabled: true
-  n_trials: 100  # Reducir a 30-50 para DL (más lento)
+  n_trials: 150  # Aumentado para aprovechar recursos
   timeout: null  # Tiempo máximo en segundos (null = sin límite)
-  n_startup_trials: 10
-  n_warmup_steps: 5
+  n_startup_trials: 15
+  n_warmup_steps: 8
   pruner: "median"  # median, hyperband, percentile
   show_progress_bar: true
-  save_visualizations: false  # true = generar HTMLs interactivos (requiere plotly)
+  save_visualizations: true  # true = generar HTMLs interactivos (requiere plotly)
 
 # ============================================================
 # MODELOS DE MACHINE LEARNING TRADICIONAL
@@ -153,7 +153,7 @@ models:
 
   knn:
     name: "K-Nearest Neighbors"
-    enabled: false
+    enabled: true
     default_params: {}
     optuna_search_space:
       n_neighbors:
@@ -232,15 +232,15 @@ metrics:
 # ============================================================
 
 deep_learning:
-  enabled: false  # CAMBIAR A true cuando experiment.type = 'dl'
-  epochs: 50
-  batch_size: 32
+  enabled: true  # CAMBIAR A true cuando experiment.type = 'dl'
+  epochs: 80
+  batch_size: 128  # Aumentado para aprovechar RTX 2060 y 48GB RAM
   
   # Early Stopping: detiene entrenamiento si no hay mejora
   early_stopping:
     enabled: true
-    patience: 10  # Épocas sin mejora antes de detener
-    min_delta: 0.001  # Mejora mínima requerida
+    patience: 15  # Épocas sin mejora antes de detener
+    min_delta: 0.0005  # Mejora mínima requerida
     monitor: "val_f1"  # val_loss, val_f1, val_accuracy
   
   # Learning Rate Scheduler: ajusta lr dinámicamente
@@ -267,7 +267,7 @@ dl_models:
   # Transformer: mejor para secuencias largas, captura dependencias globales
   transformer:
     name: "EEG Transformer"
-    enabled: false  # CAMBIAR A true para usar
+    enabled: false  # Ignorado por petición del usuario
     default_params:
       input_dim: 19
       seq_len: 3000
@@ -303,13 +303,13 @@ dl_models:
   # CNN 1D: trabaja con features extraídas, rápido y efectivo
   cnn:
     name: "1D CNN"
-    enabled: false
+    enabled: true
     default_params:
       input_features: 50  # Se ajusta automáticamente según features seleccionadas
-      conv1_channels: 64
-      conv2_channels: 128
-      fc_hidden: 64
-      dropout: 0.5
+      conv1_channels: 128  # Aumentado para RTX 2060
+      conv2_channels: 256  # Aumentado para RTX 2060
+      fc_hidden: 128  # Aumentado
+      dropout: 0.4
       num_classes: 2
     optuna_search_space:
       lr:
@@ -318,17 +318,17 @@ dl_models:
         high: 0.001
       conv1_channels:
         type: "categorical"
-        choices: [32, 64, 128]
+        choices: [64, 128, 256]  # Rango aumentado
       conv2_channels:
         type: "categorical"
-        choices: [64, 128, 256]
+        choices: [128, 256, 512]  # Rango aumentado
       fc_hidden:
         type: "categorical"
-        choices: [32, 64, 128]
+        choices: [64, 128, 256]  # Rango aumentado
       dropout:
         type: "uniform"
         low: 0.2
-        high: 0.7
+        high: 0.6
       weight_decay:
         type: "loguniform"
         low: 0.00001
@@ -337,11 +337,11 @@ dl_models:
   # LSTM: bueno para secuencias, captura dependencias temporales
   lstm:
     name: "LSTM RNN"
-    enabled: false
+    enabled: true
     default_params:
       input_dim: 19
-      hidden_dim: 128
-      num_layers: 2
+      hidden_dim: 256  # Aumentado para aprovechar recursos
+      num_layers: 3  # Aumentado
       dropout: 0.3
       bidirectional: true
       num_classes: 2
@@ -352,11 +352,11 @@ dl_models:
         high: 0.001
       hidden_dim:
         type: "categorical"
-        choices: [64, 128, 256]
+        choices: [128, 256, 512]  # Rango aumentado
       num_layers:
         type: "int"
-        low: 1
-        high: 3
+        low: 2
+        high: 4  # Aumentado
       dropout:
         type: "uniform"
         low: 0.1
@@ -369,11 +369,11 @@ dl_models:
   # GRU: similar a LSTM pero más rápido, menos parámetros
   gru:
     name: "GRU RNN"
-    enabled: false
+    enabled: true
     default_params:
       input_dim: 19
-      hidden_dim: 128
-      num_layers: 2
+      hidden_dim: 256  # Aumentado para aprovechar recursos
+      num_layers: 3  # Aumentado
       dropout: 0.3
       bidirectional: true
       num_classes: 2
@@ -384,11 +384,11 @@ dl_models:
         high: 0.001
       hidden_dim:
         type: "categorical"
-        choices: [64, 128, 256]
+        choices: [128, 256, 512]  # Rango aumentado
       num_layers:
         type: "int"
-        low: 1
-        high: 3
+        low: 2
+        high: 4  # Aumentado
       dropout:
         type: "uniform"
         low: 0.1
