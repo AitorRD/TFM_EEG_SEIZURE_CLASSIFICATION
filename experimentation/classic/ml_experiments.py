@@ -1057,8 +1057,8 @@ class MLExperiment:
         
         df = pd.DataFrame(results_dict).T
         
-        # Format values to 4 decimals
-        df_formatted = df.applymap(lambda x: f"{x:.4f}" if isinstance(x, (int, float)) and x is not None else x)
+        # Format values to 4 decimals (map replaces deprecated applymap)
+        df_formatted = df.map(lambda x: f"{x:.4f}" if isinstance(x, (int, float)) and x is not None else x)
         
         fig, ax = plt.subplots(figsize=(10, len(df) * 0.6 + 1))
         ax.axis("off")
