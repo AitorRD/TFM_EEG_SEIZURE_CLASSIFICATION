@@ -1,0 +1,90 @@
+============================================================
+  EVALUACIÓN EN VALIDACIÓN
+============================================================
+
+Logistic Regression:
+  Accuracy:  0.8897
+  Precision: 0.1063
+  Recall:    0.5000
+  F1 Score:  0.1753
+  F1 Macro:  0.5581
+
+Random Forest:
+  Accuracy:  0.9803
+  Precision: 0.8182
+  Recall:    0.2045
+  F1 Score:  0.3273
+  F1 Macro:  0.6586
+
+Support Vector Classifier:
+  Accuracy:  0.9760
+  Precision: 0.0000
+  Recall:    0.0000
+  F1 Score:  0.0000
+  F1 Macro:  0.4939
+
+K-Nearest Neighbors:
+  Accuracy:  0.9792
+  Precision: 0.6316
+  Recall:    0.2727
+  F1 Score:  0.3810
+  F1 Macro:  0.6852
+
+XGBoost:
+  Accuracy:  0.9824
+  Precision: 0.8667
+  Recall:    0.2955
+  F1 Score:  0.4407
+  F1 Macro:  0.7159
+
+🏆 Best model on validation: XGBoost
+
+
+============================================================
+  EVALUACIÓN EN TEST
+============================================================
+
+Logistic Regression:
+  Accuracy: 0.8125
+  Precision: 0.0483
+  Recall: 0.4186
+  F1 Score: 0.0865
+  F1 Macro: 0.4910
+  F1 Micro: 0.8125
+  ROC AUC: 0.7133
+
+Random Forest:
+  Accuracy: 0.9748
+  Precision: 0.3333
+  Recall: 0.1860
+  F1 Score: 0.2388
+  F1 Macro: 0.6130
+  F1 Micro: 0.9748
+  ROC AUC: 0.8019
+
+Support Vector Classifier:
+  Accuracy: 0.9808
+  Precision: 1.0000
+  Recall: 0.0930
+  F1 Score: 0.1702
+  F1 Macro: 0.5802
+  F1 Micro: 0.9808
+  ROC AUC: 0.7003
+
+K-Nearest Neighbors:
+  Accuracy: 0.9803
+  Precision: 0.6667
+  Recall: 0.1395
+  F1 Score: 0.2308
+  F1 Macro: 0.6104
+  F1 Micro: 0.9803
+  ROC AUC: 0.7316
+
+XGBoost:
+  Accuracy: 0.9837
+  Precision: 0.7500
+  Recall: 0.3488
+  F1 Score: 0.4762
+  F1 Macro: 0.7340
+  F1 Micro: 0.9837
+  ROC AUC: 0.8547
