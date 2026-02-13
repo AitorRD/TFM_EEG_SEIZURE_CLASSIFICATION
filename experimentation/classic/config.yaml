@@ -84,7 +84,7 @@ optuna:
   n_warmup_steps: 8
   pruner: "median"  # median, hyperband, percentile
   show_progress_bar: true
-  save_visualizations: true  # true = generar HTMLs interactivos (requiere plotly)
+  save_visualizations: false  # Deshabilitado - Los HTMLs nunca se generan
 
 # ============================================================
 # MODELOS DE MACHINE LEARNING TRADICIONAL

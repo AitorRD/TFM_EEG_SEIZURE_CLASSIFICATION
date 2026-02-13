@@ -675,24 +675,8 @@ class MLExperiment:
         trials_df.to_csv(trials_path, index=False)
         print(f"\n  → Results saved: {trials_path}")
         
-        # Save visualizations (optional)
-        if self.config['optuna'].get('save_visualizations', False):
-            try:
-                import optuna.visualization as vis
-                
-                fig1 = vis.plot_optimization_history(study)
-                fig2 = vis.plot_param_importances(study)
-                fig3 = vis.plot_slice(study)
-                
-                results_dir = Path(self.config['paths']['results']['metrics']).parent
-                fig1.write_html(results_dir / f"optuna_history_{model_key}.html")
-                fig2.write_html(results_dir / f"optuna_importance_{model_key}.html")
-                fig3.write_html(results_dir / f"optuna_slice_{model_key}.html")
-                print(f"  → Visualizations saved in {results_dir}/\n")
-            except ImportError:
-                print(f"  (Install plotly for visualizations: pip install plotly)\n")
-        else:
-            print(f"  (Visualizations disabled in config)\n")
+        # Visualizations disabled (HTML generation removed)
+        print(f"  (Visualizations disabled)\n")
         
         # Create pipeline with best parameters
         best_params = study.best_params
@@ -907,22 +891,8 @@ class MLExperiment:
         trials_df.to_csv(trials_path, index=False)
         print(f"\n  → Resultados guardados: {trials_path}")
         
-        # Visualizaciones (opcional)
-        if self.config['optuna'].get('save_visualizations', False):
-            try:
-                import optuna.visualization as vis
-                results_dir = Path(self.config['paths']['results']['metrics']).parent
-                fig1 = vis.plot_optimization_history(study)
-                fig2 = vis.plot_param_importances(study)
-                fig3 = vis.plot_slice(study)
-                fig1.write_html(results_dir / f"optuna_dl_history_{model_key}.html")
-                fig2.write_html(results_dir / f"optuna_dl_importance_{model_key}.html")
-                fig3.write_html(results_dir / f"optuna_dl_slice_{model_key}.html")
-                print(f"  → Visualizaciones guardadas en {results_dir}/\n")
-            except ImportError:
-                print(f"  (Instala plotly para visualizaciones)\n")
-        else:
-            print(f"  (Visualizaciones desactivadas en config)\n")
+        # Visualizations disabled (HTML generation removed)
+        print(f"  (Visualizaciones desactivadas)\n")
         
         # Entrenar modelo final con mejores parámetros
         best_pipeline = self.create_dl_pipeline(model_key, **study.best_params)
@@ -1096,20 +1066,39 @@ class MLExperiment:
         print(f"{'='*60}\n")
         
         for model_key, pipeline in self.pipelines.items():
-            model_name = self.config['models'][model_key]['name']
+            # Obtener nombre del modelo (ML o DL)
+            if model_key in self.config.get('models', {}):
+                model_name = self.config['models'][model_key]['name']
+            elif model_key in self.config.get('dl_models', {}):
+                model_name = self.config['dl_models'][model_key]['name']
+                print(f"[INFO] Saltando XAI para {model_name} (modelo DL, XAI requiere métodos específicos)\n")
+                continue
+            else:
+                model_name = model_key
+            
             print(f"Generando XAI para {model_name}...")
             
             # Obtener el modelo y scaler del pipeline
             final_model = None
             scaler = None
-            for step_name, step_transformer in pipeline.steps:
-                if isinstance(step_transformer, StandardScaler):
-                    scaler = step_transformer
-                elif hasattr(step_transformer, 'predict'):
-                    final_model = step_transformer
             
-            if final_model is None:
-                print(f"  [ERROR] No se encontró clasificador en pipeline\n")
+            try:
+                for step_name, step_transformer in pipeline.steps:
+                    if isinstance(step_transformer, StandardScaler):
+                        scaler = step_transformer
+                    elif hasattr(step_transformer, 'predict'):
+                        final_model = step_transformer
+                
+                if final_model is None:
+                    print(f"  [ERROR] No se encontró clasificador en pipeline\n")
+                    continue
+                
+                # Verificar que el modelo tenga predict_proba para XAI
+                if not hasattr(pipeline, 'predict_proba'):
+                    print(f"  [INFO] Modelo {model_name} no tiene predict_proba, saltando XAI\n")
+                    continue
+            except Exception as e:
+                print(f"  [ERROR] No se pudo procesar pipeline: {e}\n")
                 continue
             
             # Preparar datos escalados
