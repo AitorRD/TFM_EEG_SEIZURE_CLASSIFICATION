@@ -8,7 +8,7 @@
 # ============================================================
 experiment:
   name: "eeg_seizure_experiment_full"
-  type: "ml"  # CAMBIAR A: 'ml' para Machine Learning tradicional o 'dl' para Deep Learning
+  type: "all"  # Opciones: 'ml' (solo ML), 'dl' (solo DL), 'all' (ML + DL)
   random_state: 42
   n_jobs: -1  # -1 = usar todos los cores disponibles (para ML)
   device: "cuda"  # 'cuda' o 'cpu' (solo para DL, se ignora en ML)
@@ -254,7 +254,7 @@ deep_learning:
   # Formato de datos
   # 'raw' = ventanas temporales (B, T, C) para Transformer/LSTM/GRU
   # 'features' = features extraídas (B, F) para CNN sobre features
-  data_format: "raw"
+  data_format: "features"  # CAMBIAR A "features" para ejecutar CNN con ML, o "raw" para Transformer/LSTM/GRU standalone
   input_channels: 19  # Número de canales EEG
   sequence_length: 3000  # Longitud de ventana temporal
 
@@ -335,9 +335,10 @@ dl_models:
         high: 0.01
 
   # LSTM: bueno para secuencias, captura dependencias temporales
+  # NOTA: LSTM requiere data_format: "raw", deshabilitar si type: "all"
   lstm:
     name: "LSTM RNN"
-    enabled: true
+    enabled: false  # Cambiar a true solo si type: "dl" y data_format: "raw"
     default_params:
       input_dim: 19
       hidden_dim: 256  # Aumentado para aprovechar recursos
@@ -367,9 +368,10 @@ dl_models:
         high: 0.01
 
   # GRU: similar a LSTM pero más rápido, menos parámetros
+  # NOTA: GRU requiere data_format: "raw", deshabilitar si type: "all"
   gru:
     name: "GRU RNN"
-    enabled: true
+    enabled: false  # Cambiar a true solo si type: "dl" y data_format: "raw"
     default_params:
       input_dim: 19
       hidden_dim: 256  # Aumentado para aprovechar recursos
@@ -402,7 +404,18 @@ dl_models:
 # EJEMPLOS DE CONFIGURACIÓN RÁPIDA
 # ============================================================
 #
-# PARA EJECUTAR ML TRADICIONAL:
+# PARA EJECUTAR ML Y DL JUNTOS (RECOMENDADO):
+# 1. Cambiar experiment.type = "all"
+# 2. Habilitar modelos ML en sección 'models' (enabled: true)
+# 3. Habilitar modelos DL en sección 'dl_models' (enabled: true)
+# 4. Configurar deep_learning.enabled = true
+# 5. Configurar deep_learning.data_format = "features" (recomendado)
+# 6. Configurar feature_extraction.enabled = true
+# 7. Configurar feature_selection.enabled = true
+# 8. Configurar cross_validation.enabled = true (solo para ML)
+# 9. Configurar xai.enabled = true (solo para ML)
+#
+# PARA EJECUTAR SOLO ML TRADICIONAL:
 # 1. Cambiar experiment.type = "ml"
 # 2. Habilitar modelos en sección 'models' (enabled: true)
 # 3. Configurar feature_extraction.enabled = true
@@ -411,7 +424,7 @@ dl_models:
 # 6. Configurar xai.enabled = true
 # 7. deep_learning.enabled = false
 #
-# PARA EJECUTAR DEEP LEARNING:
+# PARA EJECUTAR SOLO DEEP LEARNING:
 # 1. Cambiar experiment.type = "dl"
 # 2. Deshabilitar modelos ML (models.*.enabled = false)
 # 3. Habilitar deep_learning.enabled = true

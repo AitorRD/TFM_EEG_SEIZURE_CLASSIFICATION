@@ -712,35 +712,41 @@ class MLExperiment:
         
         return best_params, best_pipeline, study
     
-    def train_models(self):
-        """Trains all enabled models (ML and DL, with or without optimization)"""
+    def train_models(self, force_type=None):
+        """Trains all enabled models (ML and DL, with or without optimization)
+        
+        Args:
+            force_type (str): Force training of specific type ('ml', 'dl', or None for config)
+        """
         # Determinar tipo de experimento
-        experiment_type = self.config['experiment'].get('type', 'ml')
+        experiment_type = force_type if force_type else self.config['experiment'].get('type', 'ml')
         
         print(f"\n{'='*60}")
         print(f"  ENTRENAMIENTO DE MODELOS ({experiment_type.upper()})")
         print(f"{'='*60}\n")
         
-        if experiment_type == 'ml' or not self.config.get('deep_learning', {}).get('enabled', False):
+        if experiment_type == 'ml' or (experiment_type == 'all' and self.get_enabled_models()):
             # Train traditional ML models
             enabled_models = self.get_enabled_models()
             
-            for model_key in enabled_models:
-                model_name = self.config['models'][model_key]['name']
-                print(f"\nEntrenando: {model_name}")
-                
-                if self.config['optuna']['enabled']:
-                    # Optimize with Optuna
-                    best_params, pipeline, study = self.optimize_with_optuna(model_key)
-                    self.pipelines[model_key] = pipeline
-                else:
-                    # Use default parameters
-                    pipeline = self.create_default_pipeline(model_key)
-                    pipeline.fit(self.X_train, self.y_train)
-                    self.pipelines[model_key] = pipeline
-                    print(f"  ✓ Trained with default parameters")
+            if enabled_models:
+                print("\n>>> Entrenando modelos de Machine Learning tradicional...\n")
+                for model_key in enabled_models:
+                    model_name = self.config['models'][model_key]['name']
+                    print(f"\nEntrenando: {model_name}")
+                    
+                    if self.config['optuna']['enabled']:
+                        # Optimize with Optuna
+                        best_params, pipeline, study = self.optimize_with_optuna(model_key)
+                        self.pipelines[model_key] = pipeline
+                    else:
+                        # Use default parameters
+                        pipeline = self.create_default_pipeline(model_key)
+                        pipeline.fit(self.X_train, self.y_train)
+                        self.pipelines[model_key] = pipeline
+                        print(f"  ✓ Trained with default parameters")
         
-        elif experiment_type == 'dl':
+        if experiment_type == 'dl' or (experiment_type == 'all' and PYTORCH_AVAILABLE and self.config.get('deep_learning', {}).get('enabled', False)):
             # Train DL models
             if not PYTORCH_AVAILABLE:
                 print("  ⚠ PyTorch/skorch not available. Cannot train DL models.")
@@ -750,8 +756,11 @@ class MLExperiment:
             
             if not enabled_dl_models:
                 print("  ⚠ No DL models enabled in configuration.")
+                if experiment_type == 'all':
+                    return  # Continue with ML models
                 return
             
+            print("\n>>> Entrenando modelos de Deep Learning...\n")
             for model_key in enabled_dl_models:
                 model_name = self.config['dl_models'][model_key]['name']
                 print(f"\nEntrenando: {model_name}")
@@ -1141,8 +1150,27 @@ class MLExperiment:
         explainer = shap.KernelExplainer(pipeline.predict_proba, background_data)
         shap_values = explainer.shap_values(X_test_scaled)
         
-        # Mean of absolute SHAP values for positive class
-        mean_abs_shap = np.abs(shap_values[1]).mean(axis=0)
+        # Handle different SHAP value formats
+        # For binary classification, shap_values can be:
+        # - A list [class_0_values, class_1_values]
+        # - A single array for the positive class
+        if isinstance(shap_values, list) and len(shap_values) == 2:
+            # Use positive class (index 1)
+            shap_for_positive_class = shap_values[1]
+        elif isinstance(shap_values, np.ndarray):
+            # Already the values for the positive class
+            shap_for_positive_class = shap_values
+        else:
+            raise ValueError(f"Unexpected shap_values format: {type(shap_values)}")
+        
+        # Mean of absolute SHAP values
+        mean_abs_shap = np.abs(shap_for_positive_class).mean(axis=0)
+        
+        # Ensure we have the right number of features
+        if len(mean_abs_shap) != len(feature_names):
+            print(f"  [WARNING] SHAP values length ({len(mean_abs_shap)}) != features ({len(feature_names)}), skipping...")
+            return
+        
         importances = pd.Series(mean_abs_shap, index=feature_names)
         importances = importances.sort_values(ascending=False).head(top_features)
         
@@ -1191,8 +1219,38 @@ class MLExperiment:
                 top_labels=1
             )
             
-            lime_weights = dict(exp.as_list(label=1))
+            # Get the label that was explained (usually the predicted class)
+            # exp.available_labels() returns list of labels that were explained
+            available_labels = exp.available_labels()
+            if not available_labels:
+                continue
+            
+            # Use the first available label (usually the predicted class)
+            target_label = available_labels[0]
+            
+            # exp.as_list() returns list of tuples: [(feature_description, weight), ...]
+            # feature_description can be like "feature_name <= 0.5" or just "feature_name"
+            # We need to extract the actual feature name
+            lime_explanation = exp.as_list(label=target_label)
+            
+            # Parse feature names from LIME's descriptions
+            lime_weights = {}
+            for feature_desc, weight in lime_explanation:
+                # Extract feature name from descriptions like "feature <= value" or "feature > value"
+                # We try to match with our feature_names
+                matched = False
+                for fname in feature_names:
+                    if fname in feature_desc:
+                        lime_weights[fname] = weight
+                        matched = True
+                        break
+                
+                # If no match, try to use the description as-is (in case it's just the feature name)
+                if not matched:
+                    lime_weights[feature_desc] = weight
+            
             current_series = pd.Series(lime_weights)
+            # Reindex to match all feature names, filling missing with 0
             current_series = current_series.reindex(feature_names, fill_value=0)
             all_lime_importances.append(current_series)
         
@@ -1219,7 +1277,7 @@ class MLExperiment:
         print(f"  ✓ LIME guardado: {plot_path}")
     
     def run(self):
-        """Executes the complete experiment pipeline (ML or DL)"""
+        """Executes the complete experiment pipeline (ML, DL, or BOTH)"""
         start_time = time.time()
         start_datetime = datetime.now()
         
@@ -1231,8 +1289,45 @@ class MLExperiment:
         print("="*60 + "\n")
         
         # Determinar flujo según tipo de experimento
-        if experiment_type == 'dl' and self.config.get('deep_learning', {}).get('enabled', False):
-            # Flujo para Deep Learning
+        if experiment_type == 'all':
+            # ==================================================================
+            # FLUJO COMBINADO: ML + DL
+            # ==================================================================
+            print("\n" + "#"*60)
+            print("  MODO: ENTRENAMIENTO COMBINADO (ML + DL)")
+            print("#"*60 + "\n")
+            
+            # 1. Cargar/extraer features (necesario para ML y para DL con features)
+            self.load_or_extract_features()
+            
+            # 2. Selección de features
+            self.select_features()
+            
+            # 3. Validación cruzada (solo para ML)
+            if self.config['cross_validation']['enabled']:
+                print("\n[INFO] Validación cruzada solo para modelos ML\n")
+                cv_results, best_cv_model = self.cross_validate_models()
+            
+            # 4. Entrenar TODOS los modelos (ML + DL)
+            self.train_models(force_type='all')
+            
+            # 5. Evaluar en validación
+            val_results, best_val_model = self.evaluate_on_validation()
+            
+            # 6. Evaluar en test
+            test_results = self.evaluate_on_test()
+            
+            # 7. Guardar tabla de métricas
+            self.plot_and_save_metrics(test_results)
+            
+            # 8. Generar explicaciones XAI (solo para modelos ML)
+            print("\n[INFO] Generando XAI solo para modelos ML (DL requiere métodos específicos)\n")
+            self.generate_xai_explanations()
+        
+        elif experiment_type == 'dl' and self.config.get('deep_learning', {}).get('enabled', False):
+            # ==================================================================
+            # FLUJO PARA DEEP LEARNING ÚNICAMENTE
+            # ==================================================================
             dl_data_format = self.config['deep_learning'].get('data_format', 'features')
             
             if dl_data_format == 'raw':
@@ -1268,7 +1363,9 @@ class MLExperiment:
             print("       Saltando XAI tradicional (SHAP/LIME) que es muy lento para redes neuronales\n")
         
         else:
-            # Flujo para Machine Learning tradicional
+            # ==================================================================
+            # FLUJO PARA MACHINE LEARNING TRADICIONAL ÚNICAMENTE
+            # ==================================================================
             # 1. Cargar/extraer features
             self.load_or_extract_features()
             
