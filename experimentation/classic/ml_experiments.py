@@ -109,7 +109,7 @@ class MLExperiment:
         """Creates necessary directories for results"""
         dirs = [
             Path(self.config['paths']['results']['xai_dir']),
-            Path(self.config['paths']['results']['optuna_dir']),
+            # Path(self.config['paths']['results']['optuna_dir']),  # Disabled: Optuna results not saved
             Path(self.config['paths']['results']['metrics']).parent,
             Path('images/graphs')  # For ROC curves and confusion matrices
         ]
@@ -696,15 +696,14 @@ class MLExperiment:
         for param, value in study.best_params.items():
             print(f"      {param}: {value}")
         
-        # Guardar resultados
-        trials_df = study.trials_dataframe()
-        optuna_dir = Path(self.config['paths']['results']['optuna_dir'])
-        trials_path = optuna_dir / f"optuna_results_{model_key}.csv"
-        trials_df.to_csv(trials_path, index=False)
-        print(f"\n  → Results saved: {trials_path}")
+        # Optuna results saving disabled (CSVs and HTMLs not needed)
+        # trials_df = study.trials_dataframe()
+        # optuna_dir = Path(self.config['paths']['results']['optuna_dir'])
+        # trials_path = optuna_dir / f"optuna_results_{model_key}.csv"
+        # trials_df.to_csv(trials_path, index=False)
+        # print(f"\n  → Results saved: {trials_path}")
         
-        # Visualizations disabled (HTML generation removed)
-        print(f"  (Visualizations disabled)\n")
+        print(f"\n  (Optuna results not saved - disabled)\n")
         
         # Extract k_features from best_params and create selector
         best_params = study.best_params.copy()
@@ -974,15 +973,14 @@ class MLExperiment:
         for param, value in study.best_params.items():
             print(f"      {param}: {value}")
         
-        # Guardar resultados
-        trials_df = study.trials_dataframe()
-        optuna_dir = Path(self.config['paths']['results']['optuna_dir'])
-        trials_path = optuna_dir / f"optuna_dl_results_{model_key}.csv"
-        trials_df.to_csv(trials_path, index=False)
-        print(f"\n  → Resultados guardados: {trials_path}")
+        # Optuna results saving disabled (CSVs and HTMLs not needed)
+        # trials_df = study.trials_dataframe()
+        # optuna_dir = Path(self.config['paths']['results']['optuna_dir'])
+        # trials_path = optuna_dir / f"optuna_dl_results_{model_key}.csv"
+        # trials_df.to_csv(trials_path, index=False)
+        # print(f"\n  → Resultados guardados: {trials_path}")
         
-        # Visualizations disabled (HTML generation removed)
-        print(f"  (Visualizaciones desactivadas)\n")
+        print(f"\n  (Resultados de Optuna no guardados - desactivado)\n")
         
         # Extract k_features and create selector if using features
         best_params = study.best_params.copy()
