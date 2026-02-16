@@ -27,8 +27,8 @@ env/
 /data/processed/folds/*
 /data/processed/windowed/*
 /data/processed/dataset_clipped/*
-/data/processed/debug_conversion.py
-
+/data/processed/optuna_results/*
+/data/processed/optuna_sample/*
 __pycache__/
 *.py[cod]
 *$py.class
