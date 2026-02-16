@@ -30,7 +30,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import (accuracy_score, precision_score, recall_score, 
-                             f1_score, roc_auc_score, make_scorer)
+                             f1_score, roc_auc_score, make_scorer, 
+                             confusion_matrix, ConfusionMatrixDisplay,
+                             roc_curve, auc, RocCurveDisplay)
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
@@ -88,6 +90,7 @@ class MLExperiment:
         self.X_test = None
         self.y_test = None
         self.selected_features = None
+        self.selectors = {}  # Feature selectors per model (with optimized k)
         self.pipelines = {}
         self.results = {}
         
@@ -107,7 +110,8 @@ class MLExperiment:
         dirs = [
             Path(self.config['paths']['results']['xai_dir']),
             Path(self.config['paths']['results']['optuna_dir']),
-            Path(self.config['paths']['results']['metrics']).parent
+            Path(self.config['paths']['results']['metrics']).parent,
+            Path('images/graphs')  # For ROC curves and confusion matrices
         ]
         for directory in dirs:
             directory.mkdir(parents=True, exist_ok=True)
@@ -201,9 +205,16 @@ class MLExperiment:
         print(f"\n[INFO] Columnas comunes alineadas: {len(common_cols)} features")
     
     def select_features(self):
-        """Selects the best k features"""
+        """Selects the best k features (only if Optuna is disabled)"""
         if not self.config['feature_selection']['enabled']:
             print("\n[FEATURE SELECTION] Deshabilitada en config")
+            self.selected_features = self.X_train.columns
+            return
+        
+        # Si Optuna está habilitado, cada modelo optimizará su propio k
+        if self.config['optuna']['enabled']:
+            print("\n[FEATURE SELECTION] Con Optuna habilitado, cada modelo optimizará su propio k")
+            print("  → Manteniendo todas las features para optimización individual\n")
             self.selected_features = self.X_train.columns
             return
         
@@ -541,6 +552,7 @@ class MLExperiment:
     def create_optuna_objective(self, model_key):
         """
         Creates objective function for Optuna optimization
+        Includes optimization of k (number of features) with SelectKBest
         
         Args:
             model_key (str): Model key to optimize
@@ -559,8 +571,24 @@ class MLExperiment:
             random_state=self.random_state
         )
         
+        # Get original features (before selection)
+        X_train_full = self.X_train
+        y_train_full = self.y_train
+        
         def objective(trial):
-            # Construir parámetros desde el espacio de búsqueda
+            # 1. Suggest k (number of features to select)
+            # Use config k as reference, but allow optimization
+            k_reference = self.config['feature_selection'].get('k', 50)
+            k_max = min(200, X_train_full.shape[1])  # Max 200 or total features
+            k_min = max(10, int(k_max * 0.1))  # Min 10 or 10% of features
+            
+            k_features = trial.suggest_int('k_features', k_min, k_max)
+            
+            # 2. Apply SelectKBest with this k
+            selector = SelectKBest(score_func=f_classif, k=k_features)
+            X_train_selected = selector.fit_transform(X_train_full, y_train_full)
+            
+            # 3. Construir parámetros del modelo desde el espacio de búsqueda
             params = {}
             for param_name, param_config in search_space.items():
                 param_type = param_config['type']
@@ -585,7 +613,7 @@ class MLExperiment:
             # Combinar con parámetros por defecto
             all_params = {**default_params, **params, 'random_state': self.random_state}
             
-            # Crear pipeline
+            # 4. Crear pipeline (sin SelectKBest, ya aplicado arriba)
             if model_key == "lr":
                 pipeline = Pipeline([
                     ('scaler', StandardScaler()),
@@ -610,9 +638,9 @@ class MLExperiment:
                     ('xgb', xgb.XGBClassifier(**all_params))
                 ])
             
-            # Evaluar con CV
+            # 5. Evaluar con CV en features seleccionadas
             scores = cross_val_score(
-                pipeline, self.X_train, self.y_train,
+                pipeline, X_train_selected, y_train_full,
                 cv=cv_strategy,
                 scoring=cv_config['scoring'],
                 n_jobs=self.n_jobs
@@ -678,8 +706,22 @@ class MLExperiment:
         # Visualizations disabled (HTML generation removed)
         print(f"  (Visualizations disabled)\n")
         
-        # Create pipeline with best parameters
-        best_params = study.best_params
+        # Extract k_features from best_params and create selector
+        best_params = study.best_params.copy()
+        k_features = best_params.pop('k_features')  # Remove k from model params
+        
+        # Create and fit selector with optimized k
+        print(f"\n  → Creating selector with k={k_features} features")
+        selector = SelectKBest(score_func=f_classif, k=k_features)
+        selector.fit(self.X_train, self.y_train)
+        
+        # Store selector for this model
+        self.selectors[model_key] = selector
+        
+        # Transform data with selected features
+        X_train_selected = selector.transform(self.X_train)
+        
+        # Create pipeline with best parameters (without k_features)
         model_config = self.config['models'][model_key]
         default_params = model_config.get('default_params', {})
         all_params = {**default_params, **best_params, 'random_state': self.random_state}
@@ -708,7 +750,9 @@ class MLExperiment:
                 ('xgb', xgb.XGBClassifier(**all_params))
             ])
         
-        best_pipeline.fit(self.X_train, self.y_train)
+        # Train on selected features
+        best_pipeline.fit(X_train_selected, self.y_train)
+        print(f"  ✓ Model trained with {k_features} selected features")
         
         return best_params, best_pipeline, study
     
@@ -820,9 +864,28 @@ class MLExperiment:
         print(f"  Trials: {optuna_config['n_trials']}")
         print(f"{'='*60}\n")
         
+        # Check if DL is using features (not raw data)
+        dl_config = self.config.get('deep_learning', {})
+        data_format = dl_config.get('data_format', 'features')
+        use_feature_selection = (data_format == 'features')
+        
         # Crear función objetivo para Optuna
         def objective(trial):
-            # Sugerir hiperparámetros
+            # 1. Si usa features, optimizar k_features
+            if use_feature_selection:
+                k_max = min(200, self.X_train.shape[1])
+                k_min = max(10, int(k_max * 0.1))
+                k_features = trial.suggest_int('k_features', k_min, k_max)
+                
+                # Apply SelectKBest
+                selector = SelectKBest(score_func=f_classif, k=k_features)
+                X_train_selected = selector.fit_transform(self.X_train, self.y_train)
+                X_val_selected = selector.transform(self.X_val)
+            else:
+                X_train_selected = self.X_train
+                X_val_selected = self.X_val
+            
+            # 2. Sugerir hiperparámetros del modelo
             params = {}
             for param_name, param_config in search_space.items():
                 param_type = param_config['type']
@@ -848,20 +911,38 @@ class MLExperiment:
             pipeline = self.create_dl_pipeline(model_key, **params)
             
             # Preparar datos de validación
-            if hasattr(self.X_val, 'values'):
-                X_val_np = self.X_val.values.astype(np.float32)
+            if hasattr(X_val_selected, 'values'):
+                X_val_np = X_val_selected.values.astype(np.float32)
+            elif isinstance(X_val_selected, np.ndarray):
+                X_val_np = X_val_selected.astype(np.float32)
+            else:
+                X_val_np = X_val_selected
+            
+            if hasattr(self.y_val, 'values'):
                 y_val_np = self.y_val.values.astype(np.int64)
             else:
-                X_val_np = self.X_val.astype(np.float32)
                 y_val_np = self.y_val.astype(np.int64)
             
+            # Preparar datos de entrenamiento
+            if hasattr(X_train_selected, 'values'):
+                X_train_np = X_train_selected.values.astype(np.float32)
+            elif isinstance(X_train_selected, np.ndarray):
+                X_train_np = X_train_selected.astype(np.float32)
+            else:
+                X_train_np = X_train_selected
+            
+            if hasattr(self.y_train, 'values'):
+                y_train_np = self.y_train.values.astype(np.int64)
+            else:
+                y_train_np = self.y_train.astype(np.int64)
+            
             # Entrenar con validación
-            pipeline.fit(self.X_train, self.y_train,
+            pipeline.fit(X_train_np, y_train_np,
                         **{f'{model_key}__X_valid': X_val_np,
                            f'{model_key}__y_valid': y_val_np})
             
             # Evaluar en validación
-            y_pred = pipeline.predict(self.X_val)
+            y_pred = pipeline.predict(X_val_np)
             
             # Usar F1 weighted como métrica
             f1 = f1_score(self.y_val, y_pred, average='weighted', zero_division=0)
@@ -903,28 +984,60 @@ class MLExperiment:
         # Visualizations disabled (HTML generation removed)
         print(f"  (Visualizaciones desactivadas)\n")
         
-        # Entrenar modelo final con mejores parámetros
-        best_pipeline = self.create_dl_pipeline(model_key, **study.best_params)
+        # Extract k_features and create selector if using features
+        best_params = study.best_params.copy()
+        if use_feature_selection and 'k_features' in best_params:
+            k_features = best_params.pop('k_features')
+            
+            print(f"  → Creating selector with k={k_features} features")
+            selector = SelectKBest(score_func=f_classif, k=k_features)
+            selector.fit(self.X_train, self.y_train)
+            
+            # Store selector for this model
+            self.selectors[model_key] = selector
+            
+            # Transform data
+            X_train_selected = selector.transform(self.X_train)
+            X_val_selected = selector.transform(self.X_val)
+        else:
+            X_train_selected = self.X_train
+            X_val_selected = self.X_val
         
-        if hasattr(self.X_train, 'values'):
-            X_train_np = self.X_train.values.astype(np.float32)
+        # Entrenar modelo final con mejores parámetros
+        best_pipeline = self.create_dl_pipeline(model_key, **best_params)
+        
+        if hasattr(X_train_selected, 'values'):
+            X_train_np = X_train_selected.values.astype(np.float32)
+        elif isinstance(X_train_selected, np.ndarray):
+            X_train_np = X_train_selected.astype(np.float32)
+        else:
+            X_train_np = X_train_selected
+        
+        if hasattr(self.y_train, 'values'):
             y_train_np = self.y_train.values.astype(np.int64)
         else:
-            X_train_np = self.X_train.astype(np.float32)
             y_train_np = self.y_train.astype(np.int64)
         
-        if hasattr(self.X_val, 'values'):
-            X_val_np = self.X_val.values.astype(np.float32)
+        if hasattr(X_val_selected, 'values'):
+            X_val_np = X_val_selected.values.astype(np.float32)
+        elif isinstance(X_val_selected, np.ndarray):
+            X_val_np = X_val_selected.astype(np.float32)
+        else:
+            X_val_np = X_val_selected
+        
+        if hasattr(self.y_val, 'values'):
             y_val_np = self.y_val.values.astype(np.int64)
         else:
-            X_val_np = self.X_val.astype(np.float32)
             y_val_np = self.y_val.astype(np.int64)
         
         best_pipeline.fit(X_train_np, y_train_np,
                          **{f'{model_key}__X_valid': X_val_np,
                             f'{model_key}__y_valid': y_val_np})
         
-        return study.best_params, best_pipeline, study
+        if use_feature_selection and model_key in self.selectors:
+            print(f"  ✓ Model trained with {k_features} selected features")
+        
+        return best_params, best_pipeline, study
     
     def evaluate_on_validation(self):
         """Evaluates all models on validation set"""
@@ -943,7 +1056,13 @@ class MLExperiment:
             else:
                 model_name = model_key
             
-            preds = pipeline.predict(self.X_val)
+            # Apply model-specific feature selection if exists
+            if model_key in self.selectors:
+                X_val_model = self.selectors[model_key].transform(self.X_val)
+            else:
+                X_val_model = self.X_val
+            
+            preds = pipeline.predict(X_val_model)
             
             metrics = {
                 'accuracy': accuracy_score(self.y_val, preds),
@@ -955,7 +1074,7 @@ class MLExperiment:
             
             if hasattr(pipeline, 'predict_proba'):
                 try:
-                    metrics['roc_auc'] = roc_auc_score(self.y_val, pipeline.predict_proba(self.X_val)[:, 1])
+                    metrics['roc_auc'] = roc_auc_score(self.y_val, pipeline.predict_proba(X_val_model)[:, 1])
                 except:
                     metrics['roc_auc'] = None
             
@@ -997,7 +1116,13 @@ class MLExperiment:
             else:
                 model_name = model_key
             
-            preds = pipeline.predict(self.X_test)
+            # Apply model-specific feature selection if exists
+            if model_key in self.selectors:
+                X_test_model = self.selectors[model_key].transform(self.X_test)
+            else:
+                X_test_model = self.X_test
+            
+            preds = pipeline.predict(X_test_model)
             
             metrics = {}
             for metric_name in self.config['metrics']:
@@ -1015,7 +1140,7 @@ class MLExperiment:
                     metrics['F1 Micro'] = f1_score(self.y_test, preds, average='micro', zero_division=0)
                 elif metric_name == 'roc_auc' and hasattr(pipeline, 'predict_proba'):
                     try:
-                        metrics['ROC AUC'] = roc_auc_score(self.y_test, pipeline.predict_proba(self.X_test)[:, 1])
+                        metrics['ROC AUC'] = roc_auc_score(self.y_test, pipeline.predict_proba(X_test_model)[:, 1])
                     except:
                         metrics['ROC AUC'] = None
             
@@ -1061,6 +1186,153 @@ class MLExperiment:
         
         print(f"✓ Metrics table saved: {save_path}\n")
     
+    def plot_roc_curves(self):
+        """Generates ROC curves for all models on test set"""
+        print(f"\n{'='*60}")
+        print(f"  GENERANDO CURVAS ROC")
+        print(f"{'='*60}\n")
+        
+        plt.figure(figsize=(10, 8))
+        
+        # Plot diagonal reference line
+        plt.plot([0, 1], [0, 1], 'k--', label='Random Classifier', linewidth=1.5)
+        
+        colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22']
+        color_idx = 0
+        
+        for model_key, pipeline in self.pipelines.items():
+            # Get model name
+            if model_key in self.config.get('models', {}):
+                model_name = self.config['models'][model_key]['name']
+            elif model_key in self.config.get('dl_models', {}):
+                model_name = self.config['dl_models'][model_key]['name']
+            else:
+                model_name = model_key
+            
+            # Check if model has predict_proba
+            if not hasattr(pipeline, 'predict_proba'):
+                print(f"  [INFO] {model_name} no tiene predict_proba, saltando...")
+                continue
+            
+            # Apply model-specific feature selection if exists
+            if model_key in self.selectors:
+                X_test_model = self.selectors[model_key].transform(self.X_test)
+            else:
+                X_test_model = self.X_test
+            
+            try:
+                # Get probability predictions
+                y_proba = pipeline.predict_proba(X_test_model)[:, 1]
+                
+                # Calculate ROC curve
+                fpr, tpr, thresholds = roc_curve(self.y_test, y_proba)
+                roc_auc = auc(fpr, tpr)
+                
+                # Plot
+                plt.plot(fpr, tpr, 
+                        label=f'{model_name} (AUC = {roc_auc:.3f})',
+                        linewidth=2.5,
+                        color=colors[color_idx % len(colors)])
+                color_idx += 1
+                
+                print(f"  ✓ {model_name}: AUC = {roc_auc:.4f}")
+                
+            except Exception as e:
+                print(f"  [ERROR] {model_name}: {e}")
+                continue
+        
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate', fontsize=12)
+        plt.ylabel('True Positive Rate', fontsize=12)
+        plt.title('ROC Curves - Test Set', fontsize=14, fontweight='bold')
+        plt.legend(loc='lower right', fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        save_path = Path('images/graphs/roc_curves.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"\n✓ ROC curves saved: {save_path}\n")
+    
+    def plot_confusion_matrices(self):
+        """Generates confusion matrices for all models on test set"""
+        print(f"\n{'='*60}")
+        print(f"  GENERANDO MATRICES DE CONFUSIÓN")
+        print(f"{'='*60}\n")
+        
+        n_models = len(self.pipelines)
+        
+        # Calculate grid dimensions
+        n_cols = min(3, n_models)  # Max 3 columns
+        n_rows = (n_models + n_cols - 1) // n_cols  # Ceiling division
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 5*n_rows))
+        
+        # Handle single model case
+        if n_models == 1:
+            axes = np.array([axes])
+        axes = axes.flatten() if n_models > 1 else axes
+        
+        model_idx = 0
+        for model_key, pipeline in self.pipelines.items():
+            # Get model name
+            if model_key in self.config.get('models', {}):
+                model_name = self.config['models'][model_key]['name']
+            elif model_key in self.config.get('dl_models', {}):
+                model_name = self.config['dl_models'][model_key]['name']
+            else:
+                model_name = model_key
+            
+            # Apply model-specific feature selection if exists
+            if model_key in self.selectors:
+                X_test_model = self.selectors[model_key].transform(self.X_test)
+            else:
+                X_test_model = self.X_test
+            
+            try:
+                # Get predictions
+                y_pred = pipeline.predict(X_test_model)
+                
+                # Calculate confusion matrix
+                cm = confusion_matrix(self.y_test, y_pred)
+                
+                # Create display
+                disp = ConfusionMatrixDisplay(
+                    confusion_matrix=cm,
+                    display_labels=['No Seizure', 'Seizure']
+                )
+                
+                # Plot on specific axis
+                ax = axes[model_idx] if n_models > 1 else axes
+                disp.plot(ax=ax, cmap='Blues', values_format='d', colorbar=False)
+                ax.set_title(f'{model_name}', fontsize=12, fontweight='bold')
+                ax.grid(False)
+                
+                # Print metrics
+                tn, fp, fn, tp = cm.ravel()
+                print(f"{model_name}:")
+                print(f"  TN={tn}, FP={fp}, FN={fn}, TP={tp}")
+                
+                model_idx += 1
+                
+            except Exception as e:
+                print(f"  [ERROR] {model_name}: {e}")
+                continue
+        
+        # Hide unused subplots
+        for idx in range(model_idx, len(axes)):
+            if n_models > 1:
+                axes[idx].set_visible(False)
+        
+        plt.tight_layout()
+        save_path = Path('images/graphs/confusion_matrices.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"\n✓ Confusion matrices saved: {save_path}\n")
+    
     def generate_xai_explanations(self):
         """Generates XAI explanations (SHAP and LIME) for all models"""
         if not self.config['xai']['enabled']:
@@ -1087,40 +1359,30 @@ class MLExperiment:
             
             print(f"Generando XAI para {model_name}...")
             
-            # Obtener el modelo y scaler del pipeline
-            final_model = None
-            scaler = None
-            
-            try:
-                for step_name, step_transformer in pipeline.steps:
-                    if isinstance(step_transformer, StandardScaler):
-                        scaler = step_transformer
-                    elif hasattr(step_transformer, 'predict'):
-                        final_model = step_transformer
-                
-                if final_model is None:
-                    print(f"  [ERROR] No se encontró clasificador en pipeline\n")
-                    continue
-                
-                # Verificar que el modelo tenga predict_proba para XAI
-                if not hasattr(pipeline, 'predict_proba'):
-                    print(f"  [INFO] Modelo {model_name} no tiene predict_proba, saltando XAI\n")
-                    continue
-            except Exception as e:
-                print(f"  [ERROR] No se pudo procesar pipeline: {e}\n")
+            # Verificar que el modelo tenga predict_proba para XAI
+            if not hasattr(pipeline, 'predict_proba'):
+                print(f"  [INFO] Modelo {model_name} no tiene predict_proba, saltando XAI\n")
                 continue
             
-            # Preparar datos escalados
-            X_train_scaled = scaler.transform(self.X_train) if scaler else self.X_train.values
-            X_test_scaled = scaler.transform(self.X_test) if scaler else self.X_test.values
-            feature_names = list(self.X_test.columns)
+            # Apply model-specific feature selection if exists
+            # IMPORTANT: Don't scale here - the pipeline has its own scaler!
+            if model_key in self.selectors:
+                X_train_xai = self.selectors[model_key].transform(self.X_train)
+                X_test_xai = self.selectors[model_key].transform(self.X_test)
+                # Get selected feature names
+                selected_mask = self.selectors[model_key].get_support()
+                feature_names = list(self.X_train.columns[selected_mask])
+            else:
+                X_train_xai = self.X_train.values if hasattr(self.X_train, 'values') else self.X_train
+                X_test_xai = self.X_test.values if hasattr(self.X_test, 'values') else self.X_test
+                feature_names = list(self.X_test.columns)
             
             # SHAP
             if xai_config['methods']['shap']['enabled']:
                 try:
                     self._generate_shap_plot(
                         model_key, model_name, pipeline,
-                        X_train_scaled, X_test_scaled, feature_names,
+                        X_train_xai, X_test_xai, feature_names,
                         save_dir, xai_config['methods']['shap']
                     )
                 except Exception as e:
@@ -1131,35 +1393,42 @@ class MLExperiment:
                 try:
                     self._generate_lime_plot(
                         model_key, model_name, pipeline,
-                        X_train_scaled, X_test_scaled, feature_names,
+                        X_train_xai, X_test_xai, feature_names,
                         save_dir, xai_config['methods']['lime']
                     )
                 except Exception as e:
                     print(f"  [ERROR] LIME falló: {e}")
     
     def _generate_shap_plot(self, model_key, model_name, pipeline, 
-                           X_train_scaled, X_test_scaled, feature_names,
+                           X_train_xai, X_test_xai, feature_names,
                            save_dir, shap_config):
         """Generates SHAP importance plot"""
         background_samples = shap_config['background_samples']
         top_features = shap_config['top_features']
         
-        background_data = X_train_scaled[:min(background_samples, len(X_train_scaled))]
+        background_data = X_train_xai[:min(background_samples, len(X_train_xai))]
         
-        # Use KernelExplainer
+        # Use KernelExplainer - pipeline.predict_proba will handle scaling internally
         explainer = shap.KernelExplainer(pipeline.predict_proba, background_data)
-        shap_values = explainer.shap_values(X_test_scaled)
+        shap_values = explainer.shap_values(X_test_xai)
         
         # Handle different SHAP value formats
         # For binary classification, shap_values can be:
         # - A list [class_0_values, class_1_values]
         # - A single array for the positive class
+        # - A 3D array (n_samples, n_features, n_classes)
         if isinstance(shap_values, list) and len(shap_values) == 2:
             # Use positive class (index 1)
             shap_for_positive_class = shap_values[1]
         elif isinstance(shap_values, np.ndarray):
-            # Already the values for the positive class
-            shap_for_positive_class = shap_values
+            # Check dimensions
+            if shap_values.ndim == 3:
+                # Shape: (n_samples, n_features, n_classes)
+                # Extract class 1 (seizure)
+                shap_for_positive_class = shap_values[:, :, 1]
+            else:
+                # Already the values for the positive class
+                shap_for_positive_class = shap_values
         else:
             raise ValueError(f"Unexpected shap_values format: {type(shap_values)}")
         
@@ -1182,6 +1451,8 @@ class MLExperiment:
         plt.ylabel("Características")
         plt.tight_layout()
         
+        # Ensure directory exists
+        save_dir.mkdir(parents=True, exist_ok=True)
         plot_path = save_dir / f"{model_key}_shap.png"
         plt.savefig(plot_path, dpi=300)
         plt.close()
@@ -1189,7 +1460,7 @@ class MLExperiment:
         print(f"  ✓ SHAP guardado: {plot_path}")
     
     def _generate_lime_plot(self, model_key, model_name, pipeline,
-                           X_train_scaled, X_test_scaled, feature_names,
+                           X_train_xai, X_test_xai, feature_names,
                            save_dir, lime_config):
         """Generates LIME importance plot"""
         n_samples = lime_config['n_samples']
@@ -1199,8 +1470,9 @@ class MLExperiment:
             print(f"  [INFO] LIME requiere predict_proba")
             return
         
+        # Pipeline will handle scaling internally
         explainer = lime.lime_tabular.LimeTabularExplainer(
-            training_data=X_train_scaled,
+            training_data=X_train_xai,
             feature_names=feature_names,
             class_names=["No Seizure", "Seizure"],
             mode="classification",
@@ -1209,11 +1481,11 @@ class MLExperiment:
         
         # Calculate average importances
         all_lime_importances = []
-        num_samples = min(n_samples, len(X_test_scaled))
+        num_samples = min(n_samples, len(X_test_xai))
         
         for idx in range(num_samples):
             exp = explainer.explain_instance(
-                X_test_scaled[idx],
+                X_test_xai[idx],
                 pipeline.predict_proba,
                 num_features=len(feature_names),
                 top_labels=1
@@ -1270,6 +1542,8 @@ class MLExperiment:
         plt.ylabel("Características")
         plt.tight_layout()
         
+        # Ensure directory exists
+        save_dir.mkdir(parents=True, exist_ok=True)
         plot_path = save_dir / f"{model_key}_lime.png"
         plt.savefig(plot_path, dpi=300)
         plt.close()
@@ -1290,9 +1564,6 @@ class MLExperiment:
         
         # Determinar flujo según tipo de experimento
         if experiment_type == 'all':
-            # ==================================================================
-            # FLUJO COMBINADO: ML + DL
-            # ==================================================================
             print("\n" + "#"*60)
             print("  MODO: ENTRENAMIENTO COMBINADO (ML + DL)")
             print("#"*60 + "\n")
@@ -1320,14 +1591,15 @@ class MLExperiment:
             # 7. Guardar tabla de métricas
             self.plot_and_save_metrics(test_results)
             
-            # 8. Generar explicaciones XAI (solo para modelos ML)
+            # 8. Generar curvas ROC y matrices de confusión
+            self.plot_roc_curves()
+            self.plot_confusion_matrices()
+            
+            # 9. Generar explicaciones XAI (solo para modelos ML)
             print("\n[INFO] Generando XAI solo para modelos ML (DL requiere métodos específicos)\n")
             self.generate_xai_explanations()
         
         elif experiment_type == 'dl' and self.config.get('deep_learning', {}).get('enabled', False):
-            # ==================================================================
-            # FLUJO PARA DEEP LEARNING ÚNICAMENTE
-            # ==================================================================
             dl_data_format = self.config['deep_learning'].get('data_format', 'features')
             
             if dl_data_format == 'raw':
@@ -1358,14 +1630,15 @@ class MLExperiment:
             # 7. Guardar tabla de métricas
             self.plot_and_save_metrics(test_results)
             
-            # 8. XAI (limitado para DL, requiere adaptación)
+            # 8. Generar curvas ROC y matrices de confusión
+            self.plot_roc_curves()
+            self.plot_confusion_matrices()
+            
+            # 9. XAI (limitado para DL, requiere adaptación)
             print("\n[INFO] XAI para DL requiere métodos específicos (ej: Attention weights, Grad-CAM)")
             print("       Saltando XAI tradicional (SHAP/LIME) que es muy lento para redes neuronales\n")
         
         else:
-            # ==================================================================
-            # FLUJO PARA MACHINE LEARNING TRADICIONAL ÚNICAMENTE
-            # ==================================================================
             # 1. Cargar/extraer features
             self.load_or_extract_features()
             
@@ -1388,7 +1661,11 @@ class MLExperiment:
             # 7. Guardar tabla de métricas
             self.plot_and_save_metrics(test_results)
             
-            # 8. Generar explicaciones XAI
+            # 8. Generar curvas ROC y matrices de confusión
+            self.plot_roc_curves()
+            self.plot_confusion_matrices()
+            
+            # 9. Generar explicaciones XAI
             self.generate_xai_explanations()
         
         # Calcular tiempo total
