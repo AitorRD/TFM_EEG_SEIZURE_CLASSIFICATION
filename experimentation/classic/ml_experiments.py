@@ -1688,8 +1688,16 @@ class MLExperiment:
 
 def main():
     """Función principal"""
+    # Determine config path based on execution directory
+    if os.path.exists("config.yaml"):
+        config_path = "config.yaml"
+    elif os.path.exists("experimentation/classic/config.yaml"):
+        config_path = "experimentation/classic/config.yaml"
+    else:
+        raise FileNotFoundError("config.yaml not found. Run from project root or experimentation/classic/")
+    
     # Crear y ejecutar experimento
-    experiment = MLExperiment(config_path="experimentation/classic/config.yaml")
+    experiment = MLExperiment(config_path=config_path)
     experiment.run()
 
 

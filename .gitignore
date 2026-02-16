@@ -15,6 +15,13 @@ venv/
 /data/processed/dataset_windowed_test.csv
 /data/processed/dataset_windowed_val.csv
 /data/processed/features_with_labels.csv
+/data/processed/features_test_sample.csv
+/data/processed/features_train_sample.csv
+/data/processed/features_val_sample.csv
+/data/processed/labels_test_sample.csv
+/data/processed/labels_train_sample.csv
+/data/processed/labels_val_sample.csv
+/data/processed/selected_features_sample.csv
 /data/processed/features_train.csv
 /data/processed/features_test.csv
 /data/processed/features_val.csv
