@@ -37,6 +37,14 @@ def run_conversion():
     print("  STEP 1: EDF to CSV CONVERSION")
     print("="*70 + "\n")
     
+    # Configure GPU 1 to avoid interfering with other users
+    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+    print("  Using GPU 1 (RTX 3090)")
+    
+    # Set CPU parallelization (use half of available cores)
+    n_jobs = 16
+    print(f"  Using {n_jobs} CPU cores for parallel processing\n")
+    
     start_time = time.time()
     
     # Import conversion script dependencies
@@ -101,7 +109,7 @@ def run_conversion():
     files_failed = 0
 
     # Process patients
-    for patient_folder in tqdm.tqdm(os.listdir(file_path_read), desc="Procesando pacientes"):
+    for patient_folder in tqdm.tqdm(sorted(os.listdir(file_path_read)), desc="Procesando pacientes"):
         patient_path = os.path.join(file_path_read, patient_folder)
         if not os.path.isdir(patient_path):
             continue
@@ -172,10 +180,10 @@ def run_conversion():
                     raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
                     lista_canales = [ch for ch in raw.ch_names if "EEG" in ch.upper()]
                     raw.pick(lista_canales)
-                    raw.filter(0.5, 70, method='iir')
-                    raw.notch_filter(60, method='iir')
+                    raw.filter(0.5, 70, method='iir', n_jobs=n_jobs)
+                    raw.notch_filter(60, method='iir', n_jobs=n_jobs)
                     ica = ICA(n_components=len(raw.ch_names), method='fastica', random_state=0, max_iter=500)
-                    ica.fit(raw)
+                    ica.fit(raw, verbose=False)
                     raw = ica.apply(raw)
                     raw.resample(100)
                     data, times = raw.get_data(return_times=True)
@@ -194,17 +202,20 @@ def run_conversion():
                     df.insert(2, "idPatient", patient_folder)
                     df.insert(3, "idSession", file.replace(".edf", ""))
                     
-                    if df["Time (s)"].max() >= (1800*2 + seizures.get(file, [{}])[0].get("end_time", 0) - seizures.get(file, [{}])[0].get("start_time", 0)):
+                    # Calculate seizure duration for the first seizure in file
+                    seizure_duration = 0
+                    if file in seizures and seizures[file]:
+                        seizure_duration = seizures[file][0]["end_time"] - seizures[file][0]["start_time"]
+                    
+                    # Apply clipping only if recording is long enough (60min + seizure duration)
+                    # Otherwise, keep the full recording
+                    if df["Time (s)"].max() >= (1800 * 2 + seizure_duration):
                         df = clipping(df, freq_hz=100, minutes=30)
                     
-                    # Only save if DataFrame has data
-                    if len(df) > 0:
-                        df.fillna(0, inplace=True)
-                        df.to_csv(csv_path, index=False)
-                        files_processed += 1
-                    else:
-                        print(f"  {file}: Empty DataFrame after clipping, not saved.")
-                        files_failed += 1
+                    # Always save the file (clipped or full)
+                    df.fillna(0, inplace=True)
+                    df.to_csv(csv_path, index=False)
+                    files_processed += 1
 
                 except Exception as e:
                     print(f"  Error processing {file}: {e}")

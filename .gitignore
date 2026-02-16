@@ -2,7 +2,7 @@
 .vscode/
 .venv/
 env/
-
+venv/
 /images/seizure_timelines/*
 /images/raw_eeg_traces/*
 
