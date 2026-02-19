@@ -7,7 +7,7 @@
 # CONFIGURACIÓN GENERAL
 # ============================================================
 experiment:
-  name: "eeg_seizure_experiment_full"
+  name: "eeg_seizure_experiment_all"
   type: "all"  # Opciones: 'ml' (solo ML), 'dl' (solo DL), 'all' (ML + DL)
   random_state: 42
   n_jobs: -1  # -1 = usar todos los cores disponibles (para ML)
@@ -30,10 +30,12 @@ paths:
     val: "data/processed/labels_val.csv"
     test: "data/processed/labels_test.csv"
   selected_features: "data/processed/selected_features.csv"
+  models_dir: "data/processed/models"  # Modelos entrenados (pipelines + selectors)
   results:
     metrics: "images/results/ml_test_metrics.png"  # Cambiar nombre según experimento
     xai_dir: "images/xai"
     optuna_dir: "data/processed/optuna_results"
+    predictions_dir: "images/results/csv"  # CSVs con predicciones por modelo
 
 # ============================================================
 # EXTRACCIÓN DE FEATURES (TSFRESH)
@@ -78,7 +80,7 @@ cross_validation:
 # ============================================================
 optuna:
   enabled: true
-  n_trials: 150  # Aumentado para aprovechar recursos
+  n_trials: 75  # Aumentado para aprovechar recursos
   timeout: null  # Tiempo máximo en segundos (null = sin límite)
   n_startup_trials: 15
   n_warmup_steps: 8
@@ -93,7 +95,7 @@ optuna:
 models:
   lr:
     name: "Logistic Regression"
-    enabled: true  # CAMBIAR A true/false para activar/desactivar
+    enabled: true
     default_params:
       max_iter: 1000
       class_weight: "balanced"
@@ -234,7 +236,7 @@ metrics:
 deep_learning:
   enabled: true  # CAMBIAR A true cuando experiment.type = 'dl'
   epochs: 80
-  batch_size: 128  # Aumentado para aprovechar RTX 2060 y 48GB RAM
+  batch_size: 32  # Reducido para evitar OOM con modelos de secuencia (LSTM/GRU)
   
   # Early Stopping: detiene entrenamiento si no hay mejora
   early_stopping:
@@ -252,11 +254,11 @@ deep_learning:
     mode: "max"  # 'max' para f1/accuracy, 'min' para loss
   
   # Formato de datos
-  # 'raw' = ventanas temporales (B, T, C) para Transformer/LSTM/GRU
+  # 'raw' = ventanas temporales (B, T, C) para LSTM/GRU
   # 'features' = features extraídas (B, F) para CNN sobre features
-  data_format: "features"  # CAMBIAR A "features" para ejecutar CNN con ML, o "raw" para Transformer/LSTM/GRU standalone
+  data_format: "features"  # CAMBIAR A "features" para ejecutar CNN con ML, o "raw" para LSTM/GRU standalone
   input_channels: 19  # Número de canales EEG
-  sequence_length: 3000  # Longitud de ventana temporal
+  sequence_length: 1000  # Longitud de ventana temporal (cada ventana tiene 1000 timesteps)
 
 # ============================================================
 # MODELOS DE DEEP LEARNING
@@ -264,42 +266,6 @@ deep_learning:
 # Requiere: pip install torch skorch
 # ============================================================
 dl_models:
-  # Transformer: mejor para secuencias largas, captura dependencias globales
-  transformer:
-    name: "EEG Transformer"
-    enabled: false  # Ignorado por petición del usuario
-    default_params:
-      input_dim: 19
-      seq_len: 3000
-      d_model: 64
-      nhead: 4
-      num_layers: 2
-      dropout: 0.1
-      num_classes: 2
-    optuna_search_space:
-      lr:
-        type: "loguniform"
-        low: 0.00001
-        high: 0.001
-      d_model:
-        type: "categorical"
-        choices: [32, 64, 128]
-      nhead:
-        type: "categorical"
-        choices: [2, 4, 8]
-      num_layers:
-        type: "int"
-        low: 1
-        high: 4
-      dropout:
-        type: "uniform"
-        low: 0.1
-        high: 0.5
-      weight_decay:
-        type: "loguniform"
-        low: 0.00001
-        high: 0.01
-
   # CNN 1D: trabaja con features extraídas, rápido y efectivo
   cnn:
     name: "1D CNN"
@@ -335,14 +301,14 @@ dl_models:
         high: 0.01
 
   # LSTM: bueno para secuencias, captura dependencias temporales
-  # NOTA: LSTM requiere data_format: "raw", deshabilitar si type: "all"
+  # En modo 'all', usa datos raw automáticamente
   lstm:
     name: "LSTM RNN"
-    enabled: false  # Cambiar a true solo si type: "dl" y data_format: "raw"
+    enabled: true
     default_params:
       input_dim: 19
-      hidden_dim: 256  # Aumentado para aprovechar recursos
-      num_layers: 3  # Aumentado
+      hidden_dim: 128
+      num_layers: 2
       dropout: 0.3
       bidirectional: true
       num_classes: 2
@@ -353,11 +319,11 @@ dl_models:
         high: 0.001
       hidden_dim:
         type: "categorical"
-        choices: [128, 256, 512]  # Rango aumentado
+        choices: [64, 128, 256]
       num_layers:
         type: "int"
-        low: 2
-        high: 4  # Aumentado
+        low: 1
+        high: 3
       dropout:
         type: "uniform"
         low: 0.1
@@ -368,14 +334,14 @@ dl_models:
         high: 0.01
 
   # GRU: similar a LSTM pero más rápido, menos parámetros
-  # NOTA: GRU requiere data_format: "raw", deshabilitar si type: "all"
+  # En modo 'all', usa datos raw automáticamente
   gru:
     name: "GRU RNN"
-    enabled: false  # Cambiar a true solo si type: "dl" y data_format: "raw"
+    enabled: true
     default_params:
       input_dim: 19
-      hidden_dim: 256  # Aumentado para aprovechar recursos
-      num_layers: 3  # Aumentado
+      hidden_dim: 128
+      num_layers: 2
       dropout: 0.3
       bidirectional: true
       num_classes: 2
@@ -386,11 +352,11 @@ dl_models:
         high: 0.001
       hidden_dim:
         type: "categorical"
-        choices: [128, 256, 512]  # Rango aumentado
+        choices: [64, 128, 256]
       num_layers:
         type: "int"
-        low: 2
-        high: 4  # Aumentado
+        low: 1
+        high: 3
       dropout:
         type: "uniform"
         low: 0.1
@@ -409,7 +375,7 @@ dl_models:
 # 2. Habilitar modelos ML en sección 'models' (enabled: true)
 # 3. Habilitar modelos DL en sección 'dl_models' (enabled: true)
 # 4. Configurar deep_learning.enabled = true
-# 5. Configurar deep_learning.data_format = "features" (recomendado)
+# 5. El pipeline carga automáticamente features para ML+CNN y datos raw para LSTM/GRU
 # 6. Configurar feature_extraction.enabled = true
 # 7. Configurar feature_selection.enabled = true
 # 8. Configurar cross_validation.enabled = true (solo para ML)
