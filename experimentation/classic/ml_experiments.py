@@ -992,8 +992,8 @@ class MLExperiment:
                     print(f"\nEntrenando: {model_name}")
                     
                     # Try to load cached model first
-                    if self.load_model(model_key):
-                        continue
+                    #if self.load_model(model_key):
+                    #    continue
                     
                     if self.config['optuna']['enabled']:
                         # Optimize with Optuna
