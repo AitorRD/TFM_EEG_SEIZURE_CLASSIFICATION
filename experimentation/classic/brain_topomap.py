@@ -140,13 +140,9 @@ def main():
         vlim=(vmin_abs, vmax_abs),
         contours=6,
         sensors=True,
-        names=ch_names,
+        names=None,
     )
-    axes[0].set_title(
-        'Pre-Ictal (Normal)',
-        fontsize=12, fontweight='bold', pad=10
-    )
-    
+
     # --- 2. Ictal Topomap ---
     im2, _ = mne.viz.plot_topomap(
         ictal_power_uv, info, axes=axes[1],
@@ -154,11 +150,7 @@ def main():
         vlim=(vmin_abs, vmax_abs),
         contours=6,
         sensors=True,
-        names=ch_names,
-    )
-    axes[1].set_title(
-        'Ictal (Seizure)',
-        fontsize=12, fontweight='bold', pad=10
+        names=None,
     )
     
     # Add colorbars
@@ -171,7 +163,7 @@ def main():
     # Suptitle
     fig.suptitle(
         'EEG Brain Activity Map\n'
-        'Pre-Ictal vs Ictal Comparison (19 channels, 10-20 System) — RMS Amplitude in µV',
+        'Pre-Ictal vs Ictal Comparison — RMS Amplitude in µV',
         fontsize=14, fontweight='bold', y=1.02
     )
     
