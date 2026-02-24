@@ -1792,24 +1792,76 @@ class MLExperiment:
             print(f"  [WARNING] SHAP values length ({len(mean_abs_shap)}) != features ({len(feature_names)}), skipping...")
             return
         
+        # Ensure directory exists
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Get feature data for coloring (use original unscaled values for interpretability)
+        if has_scaler:
+            # Use unscaled features for the beeswarm color (original µV-derived values)
+            X_display = X_test_xai
+        else:
+            X_display = X_test_scaled
+        
+        # Create DataFrame for SHAP plots
+        shap_df = pd.DataFrame(X_display, columns=feature_names)
+        
+        # Select top 20 features by mean absolute SHAP value
+        top_k = 20
+        top_indices = np.argsort(mean_abs_shap)[::-1][:top_k]
+        top_feature_names = [feature_names[i] for i in top_indices]
+        shap_top = shap_for_positive_class[:, top_indices]
+        X_display_top = shap_df[top_feature_names].values
+        
+        # --- 1. Beeswarm Plot (blue/red dot cloud) ---
+        plt.figure(figsize=(10, 8))
+        shap.summary_plot(
+            shap_top,
+            features=X_display_top,
+            feature_names=top_feature_names,
+            plot_type="dot",
+            max_display=top_k,
+            show=False,
+            plot_size=None,
+        )
+        plt.title(f"SHAP Beeswarm - {model_name} (Top {top_k})", fontsize=13, fontweight='bold')
+        plt.tight_layout()
+        plot_path = save_dir / f"{model_key}_shap_beeswarm{self.output_suffix}.png"
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  ✓ SHAP beeswarm guardado: {plot_path}")
+        
+        # --- 2. Violin Plot ---
+        plt.figure(figsize=(10, 8))
+        shap.summary_plot(
+            shap_top,
+            features=X_display_top,
+            feature_names=top_feature_names,
+            plot_type="violin",
+            max_display=top_k,
+            show=False,
+            plot_size=None,
+        )
+        plt.title(f"SHAP Violin - {model_name} (Top {top_k})", fontsize=13, fontweight='bold')
+        plt.tight_layout()
+        plot_path = save_dir / f"{model_key}_shap_violin{self.output_suffix}.png"
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  ✓ SHAP violin guardado: {plot_path}")
+        
+        # --- 3. Bar Plot (mean |SHAP|) ---
         importances = pd.Series(mean_abs_shap, index=feature_names)
         importances = importances.sort_values(ascending=False).head(top_features)
         
-        # Plot
         plt.figure(figsize=(8, 6))
         sns.barplot(x=importances.values, y=importances.index, palette="Greys")
         plt.title(f"Importancia SHAP - {model_name}")
         plt.xlabel("Importancia media (absoluta)")
         plt.ylabel("Características")
         plt.tight_layout()
-        
-        # Ensure directory exists
-        save_dir.mkdir(parents=True, exist_ok=True)
         plot_path = save_dir / f"{model_key}_shap{self.output_suffix}.png"
         plt.savefig(plot_path, dpi=300)
         plt.close()
-        
-        print(f"  ✓ SHAP guardado: {plot_path}")
+        print(f"  ✓ SHAP barplot guardado: {plot_path}")
     
     def _generate_lime_plot(self, model_key, model_name, pipeline,
                            X_train_xai, X_test_xai, feature_names,
