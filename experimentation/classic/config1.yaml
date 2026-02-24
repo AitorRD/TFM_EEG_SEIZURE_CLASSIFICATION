@@ -7,11 +7,12 @@
 # CONFIGURACIÓN GENERAL
 # ============================================================
 experiment:
-  name: "eeg_seizure_experiment_full"
+  name: "eeg_seizure_experiment_ml1"
   type: "ml"  # CAMBIAR A: 'ml' para Machine Learning tradicional o 'dl' para Deep Learning
   random_state: 42
   n_jobs: -1  # -1 = usar todos los cores disponibles (para ML)
   device: "cuda"  # 'cuda' o 'cpu' (solo para DL, se ignora en ML)
+  output_suffix: "_ml1"  # Sufijo para todos los archivos de salida
 
 # ============================================================
 # RUTAS DE DATOS
@@ -22,18 +23,20 @@ paths:
     val: "data/processed/windowed/dataset_windowed_val.csv"
     test: "data/processed/windowed/dataset_windowed_test.csv"
   features:
-    train: "data/processed/features_train.csv"
-    val: "data/processed/features_val.csv"
-    test: "data/processed/features_test.csv"
+    train: "data/processed/features_train_ml1.csv"
+    val: "data/processed/features_val_ml1.csv"
+    test: "data/processed/features_test_ml1.csv"
   labels:
-    train: "data/processed/labels_train.csv"
-    val: "data/processed/labels_val.csv"
-    test: "data/processed/labels_test.csv"
-  selected_features: "data/processed/selected_features.csv"
+    train: "data/processed/labels_train_ml1.csv"
+    val: "data/processed/labels_val_ml1.csv"
+    test: "data/processed/labels_test_ml1.csv"
+  selected_features: "data/processed/selected_features_ml1.csv"
+  models_dir: "data/processed/models"  # Modelos entrenados (pipelines + selectors)
   results:
-    metrics: "images/results/ml_test_metrics.png"  # Cambiar nombre según experimento
+    metrics: "images/results/ml_test_metrics_ml1.png"
     xai_dir: "images/xai"
     optuna_dir: "data/processed/optuna_results"
+    predictions_dir: "images/results/csv"  # CSVs con predicciones por modelo
 
 # ============================================================
 # EXTRACCIÓN DE FEATURES (TSFRESH)

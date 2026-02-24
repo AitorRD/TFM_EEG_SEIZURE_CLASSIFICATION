@@ -67,7 +67,7 @@ except ImportError:
 class MLExperiment:
     """Clase principal para experimentos de ML configurables"""
     
-    def __init__(self, config_path="config.yaml"):
+    def __init__(self, config_path="config1.yaml"):
         """
         Inicializa el experimento cargando la configuración
         
@@ -76,6 +76,7 @@ class MLExperiment:
         """
         self.config = self._load_config(config_path)
         self.random_state = self.config['experiment']['random_state']
+        self.output_suffix = self.config['experiment'].get('output_suffix', '')
         
         # Fix n_jobs for Windows compatibility with multiprocessing
         n_jobs_config = self.config['experiment'].get('n_jobs', -1)
@@ -853,12 +854,12 @@ class MLExperiment:
     def _get_model_path(self, model_key):
         """Returns the file path for a saved model pipeline"""
         models_dir = Path(self.config['paths']['models_dir'])
-        return models_dir / f"pipeline_{model_key}.joblib"
+        return models_dir / f"pipeline_{model_key}{self.output_suffix}.joblib"
     
     def _get_selector_path(self, model_key):
         """Returns the file path for a saved feature selector"""
         models_dir = Path(self.config['paths']['models_dir'])
-        return models_dir / f"selector_{model_key}.joblib"
+        return models_dir / f"selector_{model_key}{self.output_suffix}.joblib"
     
     def save_model(self, model_key, pipeline):
         """Saves a trained pipeline (and its selector if exists) to disk"""
@@ -1424,7 +1425,7 @@ class MLExperiment:
                         pass
                 
                 # Save CSV with model_key as filename
-                csv_path = predictions_dir / f"predictions_{model_key}.csv"
+                csv_path = predictions_dir / f"predictions_{model_key}{self.output_suffix}.csv"
                 df_pred.to_csv(csv_path, index=False)
                 print(f"  ✓ {model_name}: {csv_path}")
                 
@@ -1541,7 +1542,7 @@ class MLExperiment:
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         
-        save_path = Path('images/graphs/roc_curves.png')
+        save_path = Path(f'images/graphs/roc_curves{self.output_suffix}.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -1651,7 +1652,7 @@ class MLExperiment:
                 axes[idx].set_visible(False)
         
         plt.tight_layout()
-        save_path = Path('images/graphs/confusion_matrices.png')
+        save_path = Path(f'images/graphs/confusion_matrices{self.output_suffix}.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -1804,7 +1805,7 @@ class MLExperiment:
         
         # Ensure directory exists
         save_dir.mkdir(parents=True, exist_ok=True)
-        plot_path = save_dir / f"{model_key}_shap.png"
+        plot_path = save_dir / f"{model_key}_shap{self.output_suffix}.png"
         plt.savefig(plot_path, dpi=300)
         plt.close()
         
@@ -1901,7 +1902,7 @@ class MLExperiment:
         
         # Ensure directory exists
         save_dir.mkdir(parents=True, exist_ok=True)
-        plot_path = save_dir / f"{model_key}_lime.png"
+        plot_path = save_dir / f"{model_key}_lime{self.output_suffix}.png"
         plt.savefig(plot_path, dpi=300)
         plt.close()
         
@@ -2062,12 +2063,12 @@ class MLExperiment:
 def main():
     """Función principal"""
     # Determine config path based on execution directory
-    if os.path.exists("config.yaml"):
-        config_path = "config.yaml"
-    elif os.path.exists("experimentation/classic/config.yaml"):
-        config_path = "experimentation/classic/config.yaml"
+    if os.path.exists("config1.yaml"):
+        config_path = "config1.yaml"
+    elif os.path.exists("experimentation/classic/config1.yaml"):
+        config_path = "experimentation/classic/config1.yaml"
     else:
-        raise FileNotFoundError("config.yaml not found. Run from project root or experimentation/classic/")
+        raise FileNotFoundError("config1.yaml not found. Run from project root or experimentation/classic/")
     
     # Crear y ejecutar experimento
     experiment = MLExperiment(config_path=config_path)
