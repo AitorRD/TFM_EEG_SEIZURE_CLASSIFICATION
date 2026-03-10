@@ -39,7 +39,7 @@ venv/
 /data/processed/models/*
 
 /images/results/csv/*
-/images/results/F3/*
+/images/F3/*
 
 __pycache__/
 *.py[cod]
