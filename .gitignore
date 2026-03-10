@@ -36,6 +36,11 @@ venv/
 /data/processed/dataset_clipped/*
 /data/processed/optuna_results/*
 /data/processed/optuna_sample/*
+/data/processed/models/*
+
+/images/results/csv/*
+/images/results/F3/*
+
 __pycache__/
 *.py[cod]
 *$py.class

@@ -1,9 +1,3 @@
-"""
-Experimentos de Machine Learning y Deep Learning para Clasificación de Convulsiones en EEG
-Configuración basada en YAML + Optimización con Optuna
-Soporte para ML tradicional y DL con skorch
-"""
-
 import gc
 import joblib
 import pandas as pd
@@ -993,8 +987,8 @@ class MLExperiment:
                     print(f"\nEntrenando: {model_name}")
                     
                     # Try to load cached model first
-                    #if self.load_model(model_key):
-                    #    continue
+                    if self.load_model(model_key):
+                       continue
                     
                     if self.config['optuna']['enabled']:
                         # Optimize with Optuna
@@ -1535,10 +1529,11 @@ class MLExperiment:
         
         plt.xlim([0.0, 1.0])
         plt.ylim([0.0, 1.05])
-        plt.xlabel('False Positive Rate', fontsize=12)
-        plt.ylabel('True Positive Rate', fontsize=12)
-        plt.title('ROC Curves - Test Set', fontsize=14, fontweight='bold')
-        plt.legend(loc='lower right', fontsize=9)
+        plt.xlabel('False Positive Rate', fontsize=22)
+        plt.ylabel('True Positive Rate', fontsize=22)
+        plt.title('ROC Curves - Test Set', fontsize=24, fontweight='bold')
+        plt.legend(loc='lower right', fontsize=18)
+        plt.tick_params(axis='both', labelsize=18)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         
@@ -1619,18 +1614,25 @@ class MLExperiment:
                 
                 # Add title with TP, TN, FP, FN info
                 title_text = f'{model_name}\nTN={tn}, FP={fp}, FN={fn}, TP={tp}'
-                ax.set_title(title_text, fontsize=11, fontweight='bold')
+                ax.set_title(title_text, fontsize=18, fontweight='bold')
+                ax.set_xlabel(ax.get_xlabel(), fontsize=17)
+                ax.set_ylabel(ax.get_ylabel(), fontsize=17)
+                ax.tick_params(axis='both', labelsize=15)
                 ax.grid(False)
+                
+                # Increase font of the numbers inside the matrix
+                for text_obj in disp.text_.ravel():
+                    text_obj.set_fontsize(20)
                 
                 # Add text annotations for clarity
                 # Top-left: TN (True Negative)
-                ax.text(0, 0, f'\nTN', ha='center', va='top', fontsize=8, color='darkblue', weight='bold')
+                ax.text(0, 0, f'\nTN', ha='center', va='top', fontsize=13, color='darkblue', weight='bold')
                 # Top-right: FP (False Positive)
-                ax.text(1, 0, f'\nFP', ha='center', va='top', fontsize=8, color='darkred', weight='bold')
+                ax.text(1, 0, f'\nFP', ha='center', va='top', fontsize=13, color='darkred', weight='bold')
                 # Bottom-left: FN (False Negative)
-                ax.text(0, 1, f'\nFN', ha='center', va='top', fontsize=8, color='darkred', weight='bold')
+                ax.text(0, 1, f'\nFN', ha='center', va='top', fontsize=13, color='darkred', weight='bold')
                 # Bottom-right: TP (True Positive)
-                ax.text(1, 1, f'\nTP', ha='center', va='top', fontsize=8, color='darkblue', weight='bold')
+                ax.text(1, 1, f'\nTP', ha='center', va='top', fontsize=13, color='darkblue', weight='bold')
                 
                 # Print metrics to console
                 print(f"{model_name}:")
@@ -1723,6 +1725,80 @@ class MLExperiment:
                     )
                 except Exception as e:
                     print(f"  [ERROR] LIME falló: {e}")
+    def _generate_shap_topomap(self, model_key, model_name, mean_abs_shap, feature_names, save_dir):
+        """
+        Genera un mapa topográfico cerebral coloreado por importancia SHAP media por electrodo.
+        Extrae el canal EEG de cada feature (ej: 'EEG T3__root_mean_square' → T3) y
+        agrega la importancia SHAP de todas sus features.
+        """
+        try:
+            import mne
+            import re
+        except ImportError:
+            print("  [INFO] MNE no disponible, saltando topomap")
+            return
+
+        channel_map = {
+            'Fp1': 'Fp1', 'Fp2': 'Fp2',
+            'F7': 'F7',   'F3': 'F3',   'Fz': 'Fz',   'F4': 'F4',   'F8': 'F8',
+            'T3': 'T7',   'C3': 'C3',   'Cz': 'Cz',   'C4': 'C4',   'T4': 'T8',
+            'T5': 'P7',   'P3': 'P3',   'Pz': 'Pz',   'P4': 'P4',   'T6': 'P8',
+            'O1': 'O1',   'O2': 'O2'
+        }
+
+        electrode_importance = {ch: 0.0 for ch in channel_map.keys()}
+        electrode_count = {ch: 0 for ch in channel_map.keys()}
+
+        for feat_name, shap_val in zip(feature_names, mean_abs_shap):
+            match = re.search(r'EEG\s+(\w+)__', feat_name)
+            if match:
+                ch = match.group(1)
+                if ch in electrode_importance:
+                    electrode_importance[ch] += shap_val
+                    electrode_count[ch] += 1
+        for ch in electrode_importance:
+            if electrode_count[ch] > 0:
+                electrode_importance[ch] /= electrode_count[ch]
+
+        mne_ch_names = list(channel_map.values())
+        shap_values_per_electrode = np.array([
+            electrode_importance[orig_ch]
+            for orig_ch in channel_map.keys()
+        ])
+
+        montage = mne.channels.make_standard_montage('standard_1020')
+        info = mne.create_info(ch_names=mne_ch_names, sfreq=100, ch_types='eeg')
+        info.set_montage(montage)
+
+        fig, ax = plt.subplots(figsize=(7, 6))
+
+        im, _ = mne.viz.plot_topomap(
+            shap_values_per_electrode,
+            info,
+            axes=ax,
+            cmap='YlOrRd',
+            show=False,
+            contours=6,
+            sensors=True,
+            names=mne_ch_names,
+        )
+
+        for text in ax.texts:
+            text.set_fontsize(7)
+
+        cbar = fig.colorbar(im, ax=ax, shrink=0.7, pad=0.05)
+        cbar.set_label('Mean |SHAP| Importance', fontsize=10)
+
+        ax.set_title(
+            f'Brain SHAP Importance Map\n{model_name}',
+            fontsize=13, fontweight='bold', pad=15
+        )
+
+        plt.tight_layout()
+        plot_path = save_dir / f"{model_key}_shap_topomap{self.output_suffix}.png"
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  ✓ SHAP topomap guardado: {plot_path}")
     
     def _generate_shap_plot(self, model_key, model_name, pipeline, 
                            X_train_xai, X_test_xai, feature_names,
@@ -1732,11 +1808,8 @@ class MLExperiment:
         top_features = shap_config['top_features']
         
         background_data = X_train_xai[:min(background_samples, len(X_train_xai))]
-        
-        # Get the actual estimator from the pipeline (last step)
         estimator = pipeline.steps[-1][1]
         
-        # If pipeline has a scaler, pre-scale data for Tree/Linear explainers
         has_scaler = 'scaler' in dict(pipeline.steps)
         if has_scaler:
             scaler = dict(pipeline.steps)['scaler']
@@ -1745,57 +1818,38 @@ class MLExperiment:
         else:
             X_test_scaled = X_test_xai
             background_scaled = background_data
-        
-        # Select the best SHAP explainer for the model type
+
         if model_key in ('rf', 'xgb'):
-            # TreeExplainer: fast and exact for tree-based models (no scaler in their pipelines)
             print(f"  Usando TreeExplainer (óptimo para {model_name})")
             explainer = shap.TreeExplainer(estimator)
             shap_values = explainer.shap_values(X_test_scaled)
         elif model_key == 'lr':
-            # LinearExplainer: fast and exact for linear models (needs scaled data)
             print(f"  Usando LinearExplainer (óptimo para {model_name})")
             explainer = shap.LinearExplainer(estimator, background_scaled)
             shap_values = explainer.shap_values(X_test_scaled)
         else:
-            # KernelExplainer: generic but slow (SVC, KNN, etc.)
-            # Uses full pipeline so data doesn't need pre-scaling
             print(f"  Usando KernelExplainer (genérico para {model_name})")
             explainer = shap.KernelExplainer(pipeline.predict_proba, background_data)
             shap_values = explainer.shap_values(X_test_xai)
         
-        # Handle different SHAP value formats
-        # For binary classification, shap_values can be:
-        # - A list [class_0_values, class_1_values]
-        # - A single array for the positive class
-        # - A 3D array (n_samples, n_features, n_classes)
         if isinstance(shap_values, list) and len(shap_values) == 2:
-            # Use positive class (index 1)
             shap_for_positive_class = shap_values[1]
         elif isinstance(shap_values, np.ndarray):
-            # Check dimensions
             if shap_values.ndim == 3:
-                # Shape: (n_samples, n_features, n_classes)
-                # Extract class 1 (seizure)
                 shap_for_positive_class = shap_values[:, :, 1]
             else:
-                # Already the values for the positive class
                 shap_for_positive_class = shap_values
         else:
             raise ValueError(f"Unexpected shap_values format: {type(shap_values)}")
         
-        # Mean of absolute SHAP values
         mean_abs_shap = np.abs(shap_for_positive_class).mean(axis=0)
         
-        # Ensure we have the right number of features
+
         if len(mean_abs_shap) != len(feature_names):
             print(f"  [WARNING] SHAP values length ({len(mean_abs_shap)}) != features ({len(feature_names)}), skipping...")
             return
         
-        # Ensure directory exists
         save_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Get feature data for coloring (use original unscaled values for interpretability)
         if has_scaler:
             # Use unscaled features for the beeswarm color (original µV-derived values)
             X_display = X_test_xai
@@ -1829,25 +1883,14 @@ class MLExperiment:
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         print(f"  ✓ SHAP beeswarm guardado: {plot_path}")
-        
-        # --- 2. Violin Plot ---
-        plt.figure(figsize=(10, 8))
-        shap.summary_plot(
-            shap_top,
-            features=X_display_top,
-            feature_names=top_feature_names,
-            plot_type="violin",
-            max_display=top_k,
-            show=False,
-            plot_size=None,
+
+        # --- 2. Brain Topomap ---
+        self._generate_shap_topomap(
+            model_key, model_name,
+            mean_abs_shap, feature_names,
+            save_dir
         )
-        plt.title(f"SHAP Violin - {model_name} (Top {top_k})", fontsize=13, fontweight='bold')
-        plt.tight_layout()
-        plot_path = save_dir / f"{model_key}_shap_violin{self.output_suffix}.png"
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"  ✓ SHAP violin guardado: {plot_path}")
-        
+    
         # --- 3. Bar Plot (mean |SHAP|) ---
         importances = pd.Series(mean_abs_shap, index=feature_names)
         importances = importances.sort_values(ascending=False).head(top_features)
@@ -1895,38 +1938,19 @@ class MLExperiment:
                 top_labels=1
             )
             
-            # Get the label that was explained (usually the predicted class)
-            # exp.available_labels() returns list of labels that were explained
-            available_labels = exp.available_labels()
-            if not available_labels:
-                continue
-            
-            # Use the first available label (usually the predicted class)
-            target_label = available_labels[0]
-            
-            # exp.as_list() returns list of tuples: [(feature_description, weight), ...]
-            # feature_description can be like "feature_name <= 0.5" or just "feature_name"
-            # We need to extract the actual feature name
-            lime_explanation = exp.as_list(label=target_label)
-            
-            # Parse feature names from LIME's descriptions
+            lime_explanation = exp.as_list(label=1)
             lime_weights = {}
             for feature_desc, weight in lime_explanation:
-                # Extract feature name from descriptions like "feature <= value" or "feature > value"
-                # We try to match with our feature_names
                 matched = False
                 for fname in feature_names:
                     if fname in feature_desc:
                         lime_weights[fname] = weight
                         matched = True
                         break
-                
-                # If no match, try to use the description as-is (in case it's just the feature name)
                 if not matched:
                     lime_weights[feature_desc] = weight
             
             current_series = pd.Series(lime_weights)
-            # Reindex to match all feature names, filling missing with 0
             current_series = current_series.reindex(feature_names, fill_value=0)
             all_lime_importances.append(current_series)
         
@@ -1934,11 +1958,9 @@ class MLExperiment:
             print(f"  [ERROR] No se generaron explicaciones LIME")
             return
         
-        # Average importances (signed: positive = contribuye a Seizure, negative = contribuye a No Seizure)
         avg_lime = pd.concat(all_lime_importances, axis=1).mean(axis=1)
-        # Select top features by absolute value but keep the sign
         top_idx = avg_lime.abs().sort_values(ascending=False).head(top_features).index
-        lime_series = avg_lime[top_idx].sort_values()  # Sort ascending for horizontal barplot
+        lime_series = avg_lime[top_idx].sort_values() 
         
         # Plot with green (negative = No Seizure) and red (positive = Seizure)
         colors = ['#e74c3c' if v > 0 else '#2ecc71' for v in lime_series.values]

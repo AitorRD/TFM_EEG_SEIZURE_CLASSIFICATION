@@ -24,7 +24,7 @@ import matplotlib.colors as mcolors
 # ============================================================
 # CONFIGURATION — change suffix to match your experiment
 # ============================================================
-SUFFIX = "_ml1"  # "" for original, "_ml1" for experiment 1
+SUFFIX = ""
 TOP_K = 20       # Number of features for beeswarm/violin
 
 # Paths
@@ -133,7 +133,7 @@ def main():
         print(f"  {i+1:2d}. {feature_names[idx]:<45s} {mean_abs_shap[idx]:.6f}")
     
     print(f"\n✓ All SHAP plots saved to: {OUTPUT_DIR}/")
-
+#shap force plot
 
 if __name__ == "__main__":
     main()
