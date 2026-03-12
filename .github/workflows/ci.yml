@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint & Style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install linters
+        run: pip install flake8 pycodestyle
+
+      - name: Run flake8
+        run: |
+          flake8 main.py experimentation/ \
+            --max-line-length=120 \
+            --ignore=E501,W503,E402,F401 \
+            --count --show-source --statistics
+
+  syntax:
+    name: Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile main.py
+        run: python -m py_compile main.py
+
+      - name: Compile experimentation package
+        run: |
+          for f in experimentation/*.py; do
+            echo "Checking $f..."
+            python -m py_compile "$f"
+          done
+
+  imports:
+    name: Verify Imports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify package imports
+        run: |
+          python -c "from experimentation import Experiment; print('OK: Experiment')"
+          python -c "from experimentation.models import get_enabled_ml_models; print('OK: models')"
+          python -c "from experimentation.graphs import plot_roc_curves; print('OK: graphs')"
+          python -c "from experimentation.utils import load_config; print('OK: utils')"
+          python -c "from experimentation.tuning import optimize_model; print('OK: tuning')"
+          python -c "from experimentation.xai import generate_shap_summary; print('OK: xai')"
+
+  config:
+    name: Validate Config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate config.yaml
+        run: |
+          python -c "
+          import yaml, sys
+          with open('config.yaml') as f:
+              cfg = yaml.safe_load(f)
+          required = ['experiment', 'paths', 'models']
+          for key in required:
+              if key not in cfg:
+                  print(f'Missing required key: {key}')
+                  sys.exit(1)
+          print('config.yaml is valid')
+          "

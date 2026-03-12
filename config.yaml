@@ -24,7 +24,7 @@ paths:
   selected_features: "data/processed/selected_features.csv"
   models_dir: "data/processed/models"
   results:
-    metrics: "images/results/ml_test_metrics.png"
+    metrics: "images/results/metrics.png"
     xai_dir: "images/xai"
     optuna_dir: "data/processed/optuna_results"
     predictions_dir: "images/results/csv"

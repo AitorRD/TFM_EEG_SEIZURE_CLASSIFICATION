@@ -1,0 +1,62 @@
+name: Train
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Pipeline phase to run"
+        required: true
+        type: choice
+        options:
+          - train
+          - eval
+          - plots
+          - xai
+        default: train
+      config:
+        description: "Path to config file"
+        required: false
+        default: "config.yaml"
+      gpu:
+        description: "GPU to use (0 = RTX 4000 Ada, 1 = RTX 3090)"
+        required: false
+        type: choice
+        options:
+          - "0"
+          - "1"
+        default: "0"
+
+jobs:
+  train:
+    name: "Run: ${{ github.event.inputs.only }} (GPU ${{ github.event.inputs.gpu }})"
+    runs-on: self-hosted
+    timeout-minutes: 720
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show GPU status
+        run: nvidia-smi
+
+      - name: Run pipeline
+        env:
+          CUDA_VISIBLE_DEVICES: ${{ github.event.inputs.gpu }}
+        run: |
+          source venv/bin/activate
+          echo "Phase: ${{ github.event.inputs.only }}"
+          echo "Config: ${{ github.event.inputs.config }}"
+          echo "GPU: $CUDA_VISIBLE_DEVICES"
+          echo "================================"
+          python main.py --config "${{ github.event.inputs.config }}" --only "${{ github.event.inputs.only }}"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ github.event.inputs.only }}-${{ github.run_number }}
+          path: |
+            images/results/
+            images/xai/
+            data/processed/models/
+            data/processed/optuna_results/
+          retention-days: 30
