@@ -66,8 +66,8 @@ jobs:
           python -c "from experimentation.models import get_enabled_ml_models; print('OK: models')"
           python -c "from experimentation.graphs import plot_roc_curves; print('OK: graphs')"
           python -c "from experimentation.utils import load_config; print('OK: utils')"
-          python -c "from experimentation.tuning import optimize_model; print('OK: tuning')"
-          python -c "from experimentation.xai import generate_shap_summary; print('OK: xai')"
+          python -c "from experimentation.tuning import optimize_ml; print('OK: tuning')"
+          python -c "from experimentation.xai import generate_xai; print('OK: xai')"
 
   config:
     name: Validate Config
@@ -79,16 +79,23 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install config dependencies
+        run: pip install pyyaml
+
       - name: Validate config.yaml
         run: |
-          python -c "
-          import yaml, sys
-          with open('config.yaml') as f:
+          python - <<'PY'
+          import sys
+          import yaml
+
+          with open('config.yaml', encoding='utf-8') as f:
               cfg = yaml.safe_load(f)
+
           required = ['experiment', 'paths', 'models']
           for key in required:
               if key not in cfg:
                   print(f'Missing required key: {key}')
                   sys.exit(1)
+
           print('config.yaml is valid')
-          "
+          PY

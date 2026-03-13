@@ -188,9 +188,9 @@ class Experiment:
             return None
 
         cv_cfg = self.config['cross_validation']
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"  CROSS VALIDATION ({cv_cfg['n_folds']}-Fold)")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
         cv_strategy = StratifiedKFold(
             n_splits=cv_cfg['n_folds'], shuffle=cv_cfg['shuffle'],
@@ -234,9 +234,9 @@ class Experiment:
     def train(self):
         experiment_type = self.config['experiment'].get('type', 'ml')
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"  TRAINING ({experiment_type.upper()})")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
         dl_order = ['lstm', 'gru', 'cnn']
         ml_order = ['xgb', 'svc', 'rf', 'knn', 'lr']
@@ -275,7 +275,7 @@ class Experiment:
             pipeline = create_ml_pipeline(self.config, model_key)
             pipeline.fit(self.X_train, self.y_train)
             self.pipelines[model_key] = pipeline
-            print(f"  ✓ Trained with default parameters")
+            print("  ✓ Trained with default parameters")
 
         save_model(self.config, model_key, self.pipelines[model_key],
                    self.selectors, self.output_suffix)
@@ -303,7 +303,7 @@ class Experiment:
                 X_np, y_np = prepare_data_for_model(X_train_m, y_train_m, as_float32=True)
                 pipeline.fit(X_np, y_np)
                 self.pipelines[model_key] = pipeline
-                print(f"  ✓ Trained with default parameters")
+                print("  ✓ Trained with default parameters")
 
             save_model(self.config, model_key, self.pipelines[model_key],
                        self.selectors, self.output_suffix)
@@ -333,9 +333,9 @@ class Experiment:
         return X, y
 
     def evaluate_validation(self):
-        print(f"\n{'='*60}")
-        print(f"  VALIDATION EVALUATION")
-        print(f"{'='*60}\n")
+        print(f"\n{'=' * 60}")
+        print("  VALIDATION EVALUATION")
+        print(f"{'=' * 60}\n")
 
         val_results = {}
         for model_key, pipeline in self.pipelines.items():
@@ -372,9 +372,9 @@ class Experiment:
         return val_results
 
     def evaluate_test(self):
-        print(f"\n{'='*60}")
-        print(f"  TEST EVALUATION")
-        print(f"{'='*60}\n")
+        print(f"\n{'=' * 60}")
+        print("  TEST EVALUATION")
+        print(f"{'=' * 60}\n")
 
         test_results = {}
         metric_map = {
@@ -417,9 +417,9 @@ class Experiment:
         predictions_dir = Path(self.config['paths']['results']['predictions_dir'])
         predictions_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n{'='*60}")
-        print(f"  SAVING PREDICTIONS")
-        print(f"{'='*60}\n")
+        print(f"\n{'=' * 60}")
+        print("  SAVING PREDICTIONS")
+        print(f"{'=' * 60}\n")
 
         for model_key, pipeline in self.pipelines.items():
             model_name = get_model_name(self.config, model_key)

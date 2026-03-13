@@ -48,9 +48,9 @@ def _get_test_data(model_key, ctx):
 def plot_roc_curves(pipelines, ctx, suffix=""):
     config = ctx['config']
 
-    print(f"\n{'='*60}")
-    print(f"  GENERATING ROC CURVES")
-    print(f"{'='*60}\n")
+    print(f"\n{'=' * 60}")
+    print("  GENERATING ROC CURVES")
+    print(f"{'=' * 60}\n")
 
     plt.figure(figsize=(10, 8))
     plt.plot([0, 1], [0, 1], 'k--', label='Random Classifier', linewidth=1.5)
@@ -100,9 +100,9 @@ def plot_roc_curves(pipelines, ctx, suffix=""):
 def plot_confusion_matrices(pipelines, ctx, suffix=""):
     config = ctx['config']
 
-    print(f"\n{'='*60}")
-    print(f"  GENERATING CONFUSION MATRICES")
-    print(f"{'='*60}\n")
+    print(f"\n{'=' * 60}")
+    print("  GENERATING CONFUSION MATRICES")
+    print(f"{'=' * 60}\n")
 
     n_models = len(pipelines)
     n_cols = min(3, n_models)

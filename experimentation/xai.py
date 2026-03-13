@@ -26,9 +26,9 @@ def generate_xai(config, pipelines, selectors, X_train, X_test, y_test, suffix="
     save_dir = Path(config['paths']['results']['xai_dir'])
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n{'='*60}")
-    print(f"  GENERATING XAI EXPLANATIONS")
-    print(f"{'='*60}\n")
+    print(f"\n{'=' * 60}")
+    print("  GENERATING XAI EXPLANATIONS")
+    print(f"{'=' * 60}\n")
 
     for model_key, pipeline in pipelines.items():
         if model_key in config.get('dl_models', {}):
@@ -191,9 +191,11 @@ def _generate_shap_topomap(model_key, model_name, mean_abs_shap, feature_names, 
     info.set_montage(montage)
 
     fig, ax = plt.subplots(figsize=(7, 6))
-    im, _ = mne.viz.plot_topomap(shap_per_electrode, info, axes=ax,
-                                  cmap='YlOrRd', show=False, contours=6,
-                                  sensors=True, names=mne_ch_names)
+    im, _ = mne.viz.plot_topomap(
+        shap_per_electrode, info, axes=ax,
+        cmap='YlOrRd', show=False, contours=6,
+        sensors=True, names=mne_ch_names
+    )
     for text in ax.texts:
         text.set_fontsize(7)
 
@@ -215,7 +217,7 @@ def _generate_lime(model_key, model_name, pipeline,
     top_features = lime_config['top_features']
 
     if not hasattr(pipeline, "predict_proba"):
-        print(f"  [INFO] LIME requires predict_proba")
+        print("  [INFO] LIME requires predict_proba")
         return
 
     explainer = lime.lime_tabular.LimeTabularExplainer(
@@ -249,7 +251,7 @@ def _generate_lime(model_key, model_name, pipeline,
         all_lime_importances.append(current_series)
 
     if not all_lime_importances:
-        print(f"  [ERROR] No LIME explanations generated")
+        print("  [ERROR] No LIME explanations generated")
         return
 
     avg_lime = pd.concat(all_lime_importances, axis=1).mean(axis=1)

@@ -61,10 +61,10 @@ def _run_study(config, study, objective):
         show_progress_bar=optuna_config['show_progress_bar'],
     )
 
-    print(f"\n✓ Optimization completed!")
+    print("\n✓ Optimization completed!")
     print(f"  → Best Score: {study.best_value:.4f}")
     print(f"  → Trial #: {study.best_trial.number}")
-    print(f"  → Best hyperparameters:")
+    print("  → Best hyperparameters:")
     for param, value in study.best_params.items():
         print(f"      {param}: {value}")
     print()
@@ -77,10 +77,10 @@ def optimize_ml(config, model_key, X_train, y_train, n_jobs=1):
     model_name = model_config['name']
     search_space = model_config['optuna_search_space']
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  OPTUNA OPTIMIZATION - {model_name}")
     print(f"  Trials: {config['optuna']['n_trials']}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     cv_config = config['cross_validation']
     cv_strategy = StratifiedKFold(
@@ -132,10 +132,10 @@ def optimize_dl(config, model_key, X_train, y_train, X_val, y_val):
     model_name = model_config['name']
     search_space = model_config['optuna_search_space']
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  OPTUNA OPTIMIZATION - {model_name}")
     print(f"  Trials: {config['optuna']['n_trials']}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     use_feature_selection = not is_raw_dl_model(model_key) and config['feature_selection']['enabled']
 
