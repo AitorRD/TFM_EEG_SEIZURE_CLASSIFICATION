@@ -1,7 +1,5 @@
 # EEG Seizure Classification
 
-![CI](https://github.com/aitor/TFM_EEG_SEIZURE_CLASSIFICATION/actions/workflows/ci.yml/badge.svg)
-
 End-to-end framework for epileptic seizure detection from scalp EEG signals. Built as a Master's Thesis (TFM) project, it covers the full pipeline from raw EDF recordings to trained ML/DL models with explainability (XAI).
 
 ---
