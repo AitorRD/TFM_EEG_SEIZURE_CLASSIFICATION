@@ -42,6 +42,7 @@ pyyaml>=6.0
 # gluonts>=0.15.0             # Dataset/predictor utilities used by uni2ts
 # huggingface-hub>=0.25.0     # Model download backend
 # pyarrow>=16.0.0             # Recommended for Chronos data IO
+# tensorflow>=2.14.0          # Optional: TSMixer forecaster in foundation_models.py
 # tabpfn  # Modelo fundacional tabular para clasificacion (opcional)
 
 # ============ Utilities ============

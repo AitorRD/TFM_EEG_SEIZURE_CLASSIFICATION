@@ -17,6 +17,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -41,6 +42,7 @@ from experimentation.graphs import plot_metrics_table
 MODEL_DISPLAY_NAMES = {
     "chronos2": "Chronos2",
     "moirai2": "Moirai2",
+    "tsmixer": "TSMixer (Google-style)",
 }
 
 
@@ -59,14 +61,14 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--model",
-        choices=["chronos2", "moirai2"],
+        choices=["chronos2", "moirai2", "tsmixer"],
         default=None,
         help="Run a single model",
     )
     parser.add_argument(
         "--models",
         nargs="+",
-        choices=["chronos2", "moirai2"],
+        choices=["chronos2", "moirai2", "tsmixer"],
         default=None,
         help="Run multiple models (overrides --model)",
     )
@@ -131,6 +133,49 @@ def parse_args() -> argparse.Namespace:
         help="Hugging Face model id for Moirai2",
     )
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--tsmixer-epochs",
+        type=int,
+        default=20,
+        help="Training epochs for TSMixer",
+    )
+    parser.add_argument(
+        "--tsmixer-learning-rate",
+        type=float,
+        default=1e-3,
+        help="Learning rate for TSMixer optimizer",
+    )
+    parser.add_argument(
+        "--tsmixer-dropout",
+        type=float,
+        default=0.1,
+        help="Dropout rate for TSMixer blocks",
+    )
+    parser.add_argument(
+        "--tsmixer-hidden-dim",
+        type=int,
+        default=128,
+        help="Hidden dimension for TSMixer MLP blocks",
+    )
+    parser.add_argument(
+        "--tsmixer-blocks",
+        type=int,
+        default=3,
+        help="Number of mixer blocks in TSMixer",
+    )
+    parser.add_argument(
+        "--tsmixer-val-ratio",
+        type=float,
+        default=0.1,
+        help="Fraction of train windows used as internal validation for TSMixer",
+    )
+    parser.add_argument(
+        "--tsmixer-device",
+        type=str,
+        default="cpu",
+        choices=["cpu", "gpu"],
+        help="Execution device for TSMixer (cpu disables CUDA before TensorFlow import)",
+    )
 
     return parser.parse_args()
 
@@ -140,7 +185,7 @@ def resolve_models(args: argparse.Namespace) -> List[str]:
         return list(dict.fromkeys(args.models))
     if args.model:
         return [args.model]
-    return ["chronos2", "moirai2"]
+    return ["chronos2", "moirai2", "tsmixer"]
 
 
 def get_default_split_path(split: str) -> str:
@@ -357,6 +402,159 @@ class Moirai2Forecaster:
             else:
                 raise RuntimeError("Unsupported forecast object returned by Moirai2")
 
+            if len(pred_values) >= self.prediction_length:
+                preds_by_id[sid] = pred_values[: self.prediction_length]
+
+        return preds_by_id
+
+
+class TSMixerForecaster:
+    def __init__(
+        self,
+        context_length: int,
+        prediction_length: int,
+        batch_size: int,
+        epochs: int,
+        learning_rate: float,
+        dropout: float,
+        hidden_dim: int,
+        num_blocks: int,
+        val_ratio: float,
+        seed: int,
+        device: str = "cpu",
+    ):
+        self.device = device
+        if self.device == "cpu":
+            os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+
+        try:
+            import tensorflow as tf
+        except ImportError as exc:
+            raise ImportError(
+                "TensorFlow is not installed. Run: pip install tensorflow"
+            ) from exc
+
+        self.tf = tf
+        self.context_length = context_length
+        self.prediction_length = prediction_length
+        self.batch_size = batch_size
+        self.epochs = epochs
+        self.learning_rate = learning_rate
+        self.dropout = dropout
+        self.hidden_dim = hidden_dim
+        self.num_blocks = num_blocks
+        self.val_ratio = max(0.0, min(0.5, val_ratio))
+        self.seed = seed
+        self.model = None
+        self._is_fitted = False
+
+    def _build_model(self):
+        tf = self.tf
+
+        def mixer_block(x):
+            # Time-mixing MLP over sequence dimension.
+            y = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+            y = tf.keras.layers.Permute((2, 1))(y)
+            y = tf.keras.layers.Dense(self.hidden_dim, activation="gelu")(y)
+            y = tf.keras.layers.Dropout(self.dropout)(y)
+            y = tf.keras.layers.Dense(self.context_length)(y)
+            y = tf.keras.layers.Permute((2, 1))(y)
+            x = tf.keras.layers.Add()([x, y])
+
+            # Feature-mixing MLP over channel dimension.
+            y = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+            y = tf.keras.layers.Dense(self.hidden_dim, activation="gelu")(y)
+            y = tf.keras.layers.Dropout(self.dropout)(y)
+            y = tf.keras.layers.Dense(1)(y)
+            return tf.keras.layers.Add()([x, y])
+
+        inputs = tf.keras.Input(shape=(self.context_length, 1))
+        x = inputs
+        for _ in range(self.num_blocks):
+            x = mixer_block(x)
+
+        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+        x = tf.keras.layers.Flatten()(x)
+        x = tf.keras.layers.Dense(self.hidden_dim, activation="gelu")(x)
+        x = tf.keras.layers.Dropout(self.dropout)(x)
+        outputs = tf.keras.layers.Dense(self.prediction_length)(x)
+
+        model = tf.keras.Model(inputs=inputs, outputs=outputs)
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=self.learning_rate),
+            loss="mae",
+        )
+        return model
+
+    def _to_xy(self, series_dict: Dict[str, np.ndarray]) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        ids: List[str] = []
+        xs: List[np.ndarray] = []
+        ys: List[np.ndarray] = []
+
+        min_len = self.context_length + self.prediction_length
+        for sid, values in series_dict.items():
+            arr = np.asarray(values, dtype=np.float32)
+            if len(arr) < min_len:
+                continue
+            x = arr[: self.context_length]
+            y = arr[self.context_length : self.context_length + self.prediction_length]
+            xs.append(x[:, None])
+            ys.append(y)
+            ids.append(sid)
+
+        if not xs:
+            raise RuntimeError("TSMixer found no valid windows to train/predict")
+
+        return np.asarray(xs, dtype=np.float32), np.asarray(ys, dtype=np.float32), ids
+
+    def fit(self, series_dict: Dict[str, np.ndarray]) -> None:
+        tf = self.tf
+        tf.keras.utils.set_random_seed(self.seed)
+
+        X, y, _ = self._to_xy(series_dict)
+        self.model = self._build_model()
+
+        callbacks = [
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss",
+                patience=4,
+                restore_best_weights=True,
+            )
+        ]
+
+        if len(X) > 20 and self.val_ratio > 0.0:
+            self.model.fit(
+                X,
+                y,
+                batch_size=self.batch_size,
+                epochs=self.epochs,
+                validation_split=self.val_ratio,
+                shuffle=True,
+                verbose=0,
+                callbacks=callbacks,
+            )
+        else:
+            self.model.fit(
+                X,
+                y,
+                batch_size=self.batch_size,
+                epochs=max(1, min(self.epochs, 8)),
+                shuffle=True,
+                verbose=0,
+            )
+
+        self._is_fitted = True
+
+    def forecast(self, series_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        if not self._is_fitted or self.model is None:
+            raise RuntimeError("TSMixer model is not fitted. Call fit() first.")
+
+        X, _, ids = self._to_xy(series_dict)
+        preds = self.model.predict(X, batch_size=self.batch_size, verbose=0)
+
+        preds_by_id: Dict[str, np.ndarray] = {}
+        for sid, pred in zip(ids, preds):
+            pred_values = np.asarray(pred, dtype=np.float32)
             if len(pred_values) >= self.prediction_length:
                 preds_by_id[sid] = pred_values[: self.prediction_length]
 
@@ -591,6 +789,21 @@ def create_forecaster(model_key: str, args: argparse.Namespace):
             batch_size=args.batch_size,
         )
 
+    if model_key == "tsmixer":
+        return TSMixerForecaster(
+            context_length=args.context_length,
+            prediction_length=args.prediction_length,
+            batch_size=args.batch_size,
+            epochs=args.tsmixer_epochs,
+            learning_rate=args.tsmixer_learning_rate,
+            dropout=args.tsmixer_dropout,
+            hidden_dim=args.tsmixer_hidden_dim,
+            num_blocks=args.tsmixer_blocks,
+            val_ratio=args.tsmixer_val_ratio,
+            seed=args.seed,
+            device=args.tsmixer_device,
+        )
+
     raise ValueError(f"Unsupported model key: {model_key}")
 
 
@@ -609,8 +822,22 @@ def main() -> None:
 
     print("Models to run:", ", ".join(MODEL_DISPLAY_NAMES[m] for m in models))
 
+    train_path = resolve_split_path(args, "train")
     val_path = resolve_split_path(args, "val")
     test_path = resolve_split_path(args, "test")
+
+    train_data = None
+    if "tsmixer" in models:
+        train_data = load_split_data(
+            split="train",
+            csv_path=train_path,
+            channel=args.channel,
+            context_length=args.context_length,
+            prediction_length=args.prediction_length,
+            max_windows=args.max_windows,
+            window_order=args.window_order,
+            seed=args.seed - 1,
+        )
 
     val_data = load_split_data(
         split="val",
@@ -644,6 +871,10 @@ def main() -> None:
         print("=" * 60)
 
         forecaster = create_forecaster(model_key, args)
+
+        if model_key == "tsmixer":
+            print("  Fitting TSMixer on TRAIN split...")
+            forecaster.fit(train_data.series)
 
         val_preds = forecaster.forecast(val_data.series)
         val_ids, y_val, val_scores = build_scores(
