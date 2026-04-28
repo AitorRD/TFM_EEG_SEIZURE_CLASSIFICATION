@@ -23,7 +23,7 @@ from sklearn.metrics import (
 
 from .utils import (
     load_config, generate_experiment_id, resolve_n_jobs,
-    create_experiment_directories, get_model_name, prepare_data_for_model,
+    create_experiment_directories, get_model_name,
 )
 from .models import (
     create_ml_pipeline,
@@ -374,16 +374,8 @@ class Experiment:
 
         print(f"\n✓ Predictions saved to: {predictions_dir}\n")
 
-    def _build_graph_context(self):
-        return {
-            'config': self.config,
-            'X_test': self.X_test,
-            'y_test': self.y_test,
-            'selectors': self.selectors,
-        }
-
     def generate_plots(self):
-        ctx = self._build_graph_context()
+        ctx = {'config': self.config, 'X_test': self.X_test, 'y_test': self.y_test, 'selectors': self.selectors}
         plot_roc_curves(self.pipelines, ctx, self.output_suffix)
         plot_confusion_matrices(self.pipelines, ctx, self.output_suffix)
 

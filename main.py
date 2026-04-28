@@ -41,7 +41,6 @@ def main():
     elif args.only == "train":
         exp.load_or_extract_features()
         exp.select_features()
-        exp.load_raw_data_if_needed()
         exp.train()
     elif args.only == "eval":
         exp.load_or_extract_features()
@@ -59,7 +58,7 @@ def main():
     elif args.only == "xai":
         exp.load_or_extract_features()
         exp.select_features()
-        exp.load_models(include_dl=False)
+        exp.load_models()
         exp.generate_xai()
 
 

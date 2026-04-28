@@ -6,6 +6,8 @@ venv/
 /images/seizure_timelines/*
 /images/raw_eeg_traces/*
 
+pipeline.md
+
 /data/processed/dataset_clipped.csv
 /data/processed/dataset_clipped.zip
 /data/processed/dataset_windowed.csv
