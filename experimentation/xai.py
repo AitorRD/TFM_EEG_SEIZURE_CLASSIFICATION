@@ -31,11 +31,6 @@ def generate_xai(config, pipelines, selectors, X_train, X_test, y_test, suffix="
     print(f"{'=' * 60}\n")
 
     for model_key, pipeline in pipelines.items():
-        if model_key in config.get('dl_models', {}):
-            model_name = get_model_name(config, model_key)
-            print(f"[INFO] Skipping XAI for {model_name} (DL model)\n")
-            continue
-
         if model_key not in config.get('models', {}):
             continue
 

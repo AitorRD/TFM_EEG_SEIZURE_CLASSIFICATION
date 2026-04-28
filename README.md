@@ -8,7 +8,7 @@ End-to-end framework for epileptic seizure detection from scalp EEG signals. Bui
 
 **Siena Scalp EEG Database** — 14 patients, 1–5 EDF recordings each, sampled at 100 Hz across 19 channels. All dates are de-identified.
 
-- 📥 Download: [PhysioNet](https://physionet.org/content/siena-scalp-eeg/1.0.0/)
+- Download: [PhysioNet](https://physionet.org/content/siena-scalp-eeg/1.0.0/)
 - Place the raw EDF files under `data/raw/siena-scalp-eeg-database-1.0.0/`
 
 ---
@@ -26,12 +26,11 @@ End-to-end framework for epileptic seizure detection from scalp EEG signals. Bui
 ├── experimentation/               # Python package
 │   ├── __init__.py
 │   ├── utils.py                   # Config loading, helpers
-│   ├── models.py                  # ML/DL model factory (LR, RF, SVC, KNN, XGB, CNN, LSTM, GRU)
+│   ├── models.py                  # ML model factory (LR, RF, SVC, KNN, XGB)
 │   ├── tuning.py                  # Optuna hyperparameter optimisation
 │   ├── graphs.py                  # Result plots + raw EEG visualisation
 │   ├── xai.py                     # SHAP, LIME, brain topomap
 │   ├── experimentation.py         # Experiment orchestrator
-│   └── dl_models.py               # PyTorch model definitions
 │
 └── data/
     ├── raw/                       # Original EDF/CSV files
@@ -60,7 +59,7 @@ EEG channels extracted: `Fp1, Fp2, F7, F3, Fz, F4, F8, T3, C3, Cz, C4, T4, T5, P
 
 All models and hyperparameters are configured in `config.yaml`.
 
-**ML models:** Logistic Regression, Random Forest, SVC, KNN, XGBoost  
+**ML models:** Logistic Regression, Random Forest, SVC, KNN, XGBoost, TabPFN (foundation model for tabular binary classification)  
 **DL models:** CNN-1D, LSTM, GRU, EEG Transformer (d_model=64, 4 heads, 2 layers)
 
 Feature extraction via **tsfresh**, selection via **SelectKBest (k=50)**, optimisation via **Optuna**.
@@ -99,12 +98,16 @@ python main.py --only plots
 python main.py --only xai
 ```
 
-### GPU selection
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python main.py   # RTX 4000 Ada
-CUDA_VISIBLE_DEVICES=1 python main.py   # RTX 3090
-```
+Outputs:
+- Metrics image (rows = model names used): `images/results/metrics.png`
+- Predictions CSV per model: `images/results/csv/predictions_<model>_foundation.csv`
+
+Useful flags:
+- `--context-length 800 --prediction-length 200`
+- `--max-windows 256`
+- `--window-order random --seed 42`
+- `--metrics-path images/results/metrics.png`
 
 ---
 
@@ -114,7 +117,7 @@ All experiment settings live in `config.yaml`:
 
 | Section | Key fields |
 |---------|-----------|
-| `experiment` | `type` (ml/dl), `device`, `random_state`, `n_jobs` |
+| `experiment` | `type` (ml), `device`, `random_state`, `n_jobs` |
 | `paths` | Data, features, labels, models, results directories |
 | `feature_extraction` | tsfresh parameters |
 | `feature_selection` | method, `k` |

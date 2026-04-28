@@ -12,16 +12,11 @@ Usage:
 """
 
 import argparse
-import sys
 import os
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 from experimentation import Experiment
-from experimentation.models import (
-    get_enabled_ml_models, get_enabled_dl_models,
-    load_model, is_raw_dl_model, PYTORCH_AVAILABLE,
-)
 
 
 def main():
@@ -46,41 +41,25 @@ def main():
     elif args.only == "train":
         exp.load_or_extract_features()
         exp.select_features()
-        if PYTORCH_AVAILABLE:
-            raw_models = [m for m in get_enabled_dl_models(exp.config) if is_raw_dl_model(m)]
-            if raw_models:
-                exp.load_raw_data()
+        exp.load_raw_data_if_needed()
         exp.train()
     elif args.only == "eval":
         exp.load_or_extract_features()
         exp.select_features()
-        for mk in get_enabled_ml_models(exp.config):
-            load_model(exp.config, mk, exp.pipelines, exp.selectors, exp.output_suffix)
-        if PYTORCH_AVAILABLE:
-            for mk in get_enabled_dl_models(exp.config):
-                load_model(exp.config, mk, exp.pipelines, exp.selectors, exp.output_suffix)
-                if is_raw_dl_model(mk) and exp.X_test_raw is None:
-                    exp.load_raw_data()
+        exp.load_models()
         exp.evaluate_validation()
         exp.evaluate_test()
         exp.save_predictions()
     elif args.only == "plots":
         exp.load_or_extract_features()
         exp.select_features()
-        for mk in get_enabled_ml_models(exp.config):
-            load_model(exp.config, mk, exp.pipelines, exp.selectors, exp.output_suffix)
-        if PYTORCH_AVAILABLE:
-            for mk in get_enabled_dl_models(exp.config):
-                load_model(exp.config, mk, exp.pipelines, exp.selectors, exp.output_suffix)
-                if is_raw_dl_model(mk) and exp.X_test_raw is None:
-                    exp.load_raw_data()
+        exp.load_models()
         exp.evaluate_test()
         exp.generate_plots()
     elif args.only == "xai":
         exp.load_or_extract_features()
         exp.select_features()
-        for mk in get_enabled_ml_models(exp.config):
-            load_model(exp.config, mk, exp.pipelines, exp.selectors, exp.output_suffix)
+        exp.load_models(include_dl=False)
         exp.generate_xai()
 
 

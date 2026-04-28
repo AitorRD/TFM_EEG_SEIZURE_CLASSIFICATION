@@ -38,6 +38,7 @@ venv/
 /data/processed/optuna_sample/*
 /data/processed/models/*
 
+/experimentation/images/results/csv/*
 /images/results/csv/*
 /images/F3/*
 

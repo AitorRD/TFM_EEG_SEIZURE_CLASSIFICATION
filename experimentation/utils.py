@@ -45,8 +45,6 @@ def create_experiment_directories(config, experiment_id):
 def get_model_name(config, model_key):
     if model_key in config.get('models', {}):
         return config['models'][model_key]['name']
-    elif model_key in config.get('dl_models', {}):
-        return config['dl_models'][model_key]['name']
     return model_key
 
 

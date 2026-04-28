@@ -5,7 +5,7 @@ experiment:
   random_state: 42
   n_jobs: -1
   device: "cuda"
-  output_suffix: ""
+  output_suffix: "_tabpfn"
 
 # PATHS
 paths:
@@ -24,14 +24,14 @@ paths:
   selected_features: "data/processed/selected_features.csv"
   models_dir: "data/processed/models"
   results:
-    metrics: "images/results/metrics.png"
+    metrics: "images/results/metrics1.png"
     xai_dir: "images/xai"
     optuna_dir: "data/processed/optuna_results"
     predictions_dir: "images/results/csv"
 
 # FEATURE EXTRACTION (TSFRESH)
 feature_extraction:
-  enabled: true
+  enabled: false
   custom_fc_parameters:
     absolute_sum_of_changes: null
     mean_abs_change: null
@@ -59,7 +59,7 @@ cross_validation:
 
 # OPTUNA OPTIMIZATION
 optuna:
-  enabled: true
+  enabled: false
   n_trials: 150
   timeout: null
   n_startup_trials: 15
@@ -72,7 +72,7 @@ optuna:
 models:
   lr:
     name: "Logistic Regression"
-    enabled: false
+    enabled: true
     default_params:
       max_iter: 1000
       class_weight: "balanced"
@@ -91,7 +91,7 @@ models:
 
   rf:
     name: "Random Forest"
-    enabled: false
+    enabled: true
     default_params:
       class_weight: "balanced"
     optuna_search_space:
@@ -114,7 +114,7 @@ models:
 
   svc:
     name: "Support Vector Classifier"
-    enabled: false
+    enabled: true
     default_params:
       probability: true
       class_weight: "balanced"
@@ -132,7 +132,7 @@ models:
 
   knn:
     name: "K-Nearest Neighbors"
-    enabled: false
+    enabled: true
     default_params: {}
     optuna_search_space:
       n_neighbors:
@@ -174,6 +174,21 @@ models:
         low: 0.6
         high: 1.0
 
+  tabpfn:
+    name: "TabPFN"
+    enabled: true
+    default_params:
+      device: "auto"
+      ignore_pretraining_limits: true
+    optuna_search_space: {}
+
+  tabicl:
+    name: "TabICL"
+    enabled: true
+    default_params:
+      device: "cuda:0"
+    optuna_search_space: {}
+
 # XAI - EXPLAINABILITY
 xai:
   enabled: true
@@ -198,154 +213,154 @@ metrics:
   - f1_micro
   - roc_auc
 
-# DEEP LEARNING
-deep_learning:
-  enabled: true
-  epochs: 80
-  batch_size: 128
-  early_stopping:
-    enabled: true
-    patience: 15
-    min_delta: 0.0005
-    monitor: "val_f1"
-  lr_scheduler:
-    enabled: true
-    type: "ReduceLROnPlateau"
-    factor: 0.5
-    patience: 5
-    mode: "max"
-  data_format: "raw"
-  input_channels: 19
-  sequence_length: 3000
-
-# DL MODELS
-dl_models:
-  transformer:
-    name: "EEG Transformer"
-    enabled: false
-    default_params:
-      input_dim: 19
-      seq_len: 3000
-      d_model: 64
-      nhead: 4
-      num_layers: 2
-      dropout: 0.1
-      num_classes: 2
-    optuna_search_space:
-      lr:
-        type: "loguniform"
-        low: 0.00001
-        high: 0.001
-      d_model:
-        type: "categorical"
-        choices: [32, 64, 128]
-      nhead:
-        type: "categorical"
-        choices: [2, 4, 8]
-      num_layers:
-        type: "int"
-        low: 1
-        high: 4
-      dropout:
-        type: "uniform"
-        low: 0.1
-        high: 0.5
-      weight_decay:
-        type: "loguniform"
-        low: 0.00001
-        high: 0.01
-
-  cnn:
-    name: "1D CNN"
-    enabled: true
-    default_params:
-      input_features: 50
-      conv1_channels: 128
-      conv2_channels: 256
-      fc_hidden: 128
-      dropout: 0.4
-      num_classes: 2
-    optuna_search_space:
-      lr:
-        type: "loguniform"
-        low: 0.00001
-        high: 0.001
-      conv1_channels:
-        type: "categorical"
-        choices: [64, 128, 256]
-      conv2_channels:
-        type: "categorical"
-        choices: [128, 256, 512]
-      fc_hidden:
-        type: "categorical"
-        choices: [64, 128, 256]
-      dropout:
-        type: "uniform"
-        low: 0.2
-        high: 0.6
-      weight_decay:
-        type: "loguniform"
-        low: 0.00001
-        high: 0.01
-
-  lstm:
-    name: "LSTM RNN"
-    enabled: true
-    default_params:
-      input_dim: 19
-      hidden_dim: 256
-      num_layers: 3
-      dropout: 0.3
-      bidirectional: true
-      num_classes: 2
-    optuna_search_space:
-      lr:
-        type: "loguniform"
-        low: 0.00001
-        high: 0.001
-      hidden_dim:
-        type: "categorical"
-        choices: [128, 256, 512]
-      num_layers:
-        type: "int"
-        low: 2
-        high: 4
-      dropout:
-        type: "uniform"
-        low: 0.1
-        high: 0.5
-      weight_decay:
-        type: "loguniform"
-        low: 0.00001
-        high: 0.01
-
-  gru:
-    name: "GRU RNN"
-    enabled: true
-    default_params:
-      input_dim: 19
-      hidden_dim: 256
-      num_layers: 3
-      dropout: 0.3
-      bidirectional: true
-      num_classes: 2
-    optuna_search_space:
-      lr:
-        type: "loguniform"
-        low: 0.00001
-        high: 0.001
-      hidden_dim:
-        type: "categorical"
-        choices: [128, 256, 512]
-      num_layers:
-        type: "int"
-        low: 2
-        high: 4
-      dropout:
-        type: "uniform"
-        low: 0.1
-        high: 0.5
-      weight_decay:
-        type: "loguniform"
-        low: 0.00001
-        high: 0.01
+# # DEEP LEARNING
+# deep_learning:
+#   enabled: false
+#   epochs: 80
+#   batch_size: 128
+#   early_stopping:
+#     enabled: true
+#     patience: 15
+#     min_delta: 0.0005
+#     monitor: "val_f1"
+#   lr_scheduler:
+#     enabled: true
+#     type: "ReduceLROnPlateau"
+#     factor: 0.5
+#     patience: 5
+#     mode: "max"
+#   data_format: "raw"
+#   input_channels: 19
+#   sequence_length: 3000
+#
+# # DL MODELS
+# dl_models:
+#   transformer:
+#     name: "EEG Transformer"
+#     enabled: false
+#     default_params:
+#       input_dim: 19
+#       seq_len: 3000
+#       d_model: 64
+#       nhead: 4
+#       num_layers: 2
+#       dropout: 0.1
+#       num_classes: 2
+#     optuna_search_space:
+#       lr:
+#         type: "loguniform"
+#         low: 0.00001
+#         high: 0.001
+#       d_model:
+#         type: "categorical"
+#         choices: [32, 64, 128]
+#       nhead:
+#         type: "categorical"
+#         choices: [2, 4, 8]
+#       num_layers:
+#         type: "int"
+#         low: 1
+#         high: 4
+#       dropout:
+#         type: "uniform"
+#         low: 0.1
+#         high: 0.5
+#       weight_decay:
+#         type: "loguniform"
+#         low: 0.00001
+#         high: 0.01
+#
+#   cnn:
+#     name: "1D CNN"
+#     enabled: false
+#     default_params:
+#       input_features: 50
+#       conv1_channels: 128
+#       conv2_channels: 256
+#       fc_hidden: 128
+#       dropout: 0.4
+#       num_classes: 2
+#     optuna_search_space:
+#       lr:
+#         type: "loguniform"
+#         low: 0.00001
+#         high: 0.001
+#       conv1_channels:
+#         type: "categorical"
+#         choices: [64, 128, 256]
+#       conv2_channels:
+#         type: "categorical"
+#         choices: [128, 256, 512]
+#       fc_hidden:
+#         type: "categorical"
+#         choices: [64, 128, 256]
+#       dropout:
+#         type: "uniform"
+#         low: 0.2
+#         high: 0.6
+#       weight_decay:
+#         type: "loguniform"
+#         low: 0.00001
+#         high: 0.01
+#
+#   lstm:
+#     name: "LSTM RNN"
+#     enabled: false
+#     default_params:
+#       input_dim: 19
+#       hidden_dim: 256
+#       num_layers: 3
+#       dropout: 0.3
+#       bidirectional: true
+#       num_classes: 2
+#     optuna_search_space:
+#       lr:
+#         type: "loguniform"
+#         low: 0.00001
+#         high: 0.001
+#       hidden_dim:
+#         type: "categorical"
+#         choices: [128, 256, 512]
+#       num_layers:
+#         type: "int"
+#         low: 2
+#         high: 4
+#       dropout:
+#         type: "uniform"
+#         low: 0.1
+#         high: 0.5
+#       weight_decay:
+#         type: "loguniform"
+#         low: 0.00001
+#         high: 0.01
+#
+#   gru:
+#     name: "GRU RNN"
+#     enabled: false
+#     default_params:
+#       input_dim: 19
+#       hidden_dim: 256
+#       num_layers: 3
+#       dropout: 0.3
+#       bidirectional: true
+#       num_classes: 2
+#     optuna_search_space:
+#       lr:
+#         type: "loguniform"
+#         low: 0.00001
+#         high: 0.001
+#       hidden_dim:
+#         type: "categorical"
+#         choices: [128, 256, 512]
+#       num_layers:
+#         type: "int"
+#         low: 2
+#         high: 4
+#       dropout:
+#         type: "uniform"
+#         low: 0.1
+#         high: 0.5
+#       weight_decay:
+#         type: "loguniform"
+#         low: 0.00001
+#         high: 0.01

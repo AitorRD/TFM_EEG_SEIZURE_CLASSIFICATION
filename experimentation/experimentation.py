@@ -1,6 +1,6 @@
 """
 Main experiment orchestrator: data loading, feature extraction/selection, cross-validation,
-training (ML and DL), evaluation, prediction export, plot generation, and XAI.
+training, evaluation, prediction export, plot generation, and XAI.
 """
 
 import os
@@ -26,18 +26,16 @@ from .utils import (
     create_experiment_directories, get_model_name, prepare_data_for_model,
 )
 from .models import (
-    create_ml_pipeline, create_dl_pipeline,
-    get_enabled_ml_models, get_enabled_dl_models,
-    is_raw_dl_model, save_model, load_model, free_gpu_memory,
-    PYTORCH_AVAILABLE,
+    create_ml_pipeline,
+    get_enabled_ml_models,
+    save_model, load_model,
 )
-from .tuning import optimize_ml, optimize_dl
+from .tuning import optimize_ml
 from .graphs import plot_roc_curves, plot_confusion_matrices, plot_metrics_table
 from .xai import generate_xai
 
-if PYTORCH_AVAILABLE:
-    import torch
-    from .dl_models import EEGWindowDataset
+# Pretrained models: no hyperparameters to tune with Optuna
+_NO_OPTUNA_MODELS = {'tabpfn', 'tabicl'}
 
 
 class Experiment:
@@ -55,13 +53,6 @@ class Experiment:
         self.y_val = None
         self.X_test = None
         self.y_test = None
-
-        self.X_train_raw = None
-        self.y_train_raw = None
-        self.X_val_raw = None
-        self.y_val_raw = None
-        self.X_test_raw = None
-        self.y_test_raw = None
 
         self.selected_features = None
         self.selectors = {}
@@ -139,24 +130,9 @@ class Experiment:
         self.X_test = self.X_test[common]
         print(f"\n[INFO] Common columns aligned: {len(common)} features")
 
-    def load_raw_data(self):
-        if not PYTORCH_AVAILABLE:
-            raise ImportError("PyTorch not available")
-
-        dl_config = self.config['deep_learning']
-        print("\n[DL] Loading raw data for sequence models...")
-
-        for mode, attr_x, attr_y in [
-            ('train', 'X_train_raw', 'y_train_raw'),
-            ('val', 'X_val_raw', 'y_val_raw'),
-            ('test', 'X_test_raw', 'y_test_raw'),
-        ]:
-            df = pd.read_csv(self.config['paths']['data'][mode])
-            ds = EEGWindowDataset(df, n_channels=dl_config['input_channels'],
-                                  seq_len=dl_config['sequence_length'])
-            setattr(self, attr_x, ds.data.numpy())
-            setattr(self, attr_y, ds.labels.numpy())
-            print(f"  {mode.capitalize()} shape: {getattr(self, attr_x).shape}")
+    def load_models(self):
+        for mk in get_enabled_ml_models(self.config):
+            load_model(self.config, mk, self.pipelines, self.selectors, self.output_suffix)
 
     def select_features(self):
         if not self.config['feature_selection']['enabled']:
@@ -166,6 +142,17 @@ class Experiment:
 
         if self.config['optuna']['enabled']:
             print("\n[FEATURE SELECTION] With Optuna, each model will optimize its own k")
+            self.selected_features = self.X_train.columns
+            return
+
+        suffix = self.output_suffix
+        models_dir = Path(self.config['paths']['models_dir'])
+        has_cached = any(
+            (models_dir / f"pipeline_{mk}{suffix}.joblib").exists()
+            for mk in get_enabled_ml_models(self.config)
+        )
+        if has_cached:
+            print("\n[FEATURE SELECTION] Skipping global selection — cached pipelines carry their own feature subset")
             self.selected_features = self.X_train.columns
             return
 
@@ -199,6 +186,10 @@ class Experiment:
 
         cv_results = {}
         for model_key in get_enabled_ml_models(self.config):
+            if model_key in _NO_OPTUNA_MODELS:
+                print(f"  Skipping CV for {get_model_name(self.config, model_key)} (pretrained model)")
+                continue
+
             model_name = get_model_name(self.config, model_key)
             print(f"Evaluating {model_name}...")
             pipeline = create_ml_pipeline(self.config, model_key)
@@ -216,47 +207,17 @@ class Experiment:
 
         return cv_results
 
-    def _get_model_data(self, model_key, split='train'):
-        if is_raw_dl_model(model_key) and self.X_train_raw is not None:
-            data = {
-                'train': (self.X_train_raw, self.y_train_raw),
-                'val': (self.X_val_raw, self.y_val_raw),
-                'test': (self.X_test_raw, self.y_test_raw),
-            }
-        else:
-            data = {
-                'train': (self.X_train, self.y_train),
-                'val': (self.X_val, self.y_val),
-                'test': (self.X_test, self.y_test),
-            }
-        return data[split]
-
     def train(self):
-        experiment_type = self.config['experiment'].get('type', 'ml')
-
         print(f"\n{'=' * 60}")
-        print(f"  TRAINING ({experiment_type.upper()})")
+        print(f"  TRAINING")
         print(f"{'=' * 60}\n")
 
-        dl_order = ['lstm', 'gru', 'cnn']
-        ml_order = ['xgb', 'svc', 'rf', 'knn', 'lr']
-
-        if experiment_type in ('dl', 'all'):
-            if not PYTORCH_AVAILABLE:
-                print("  ⚠ PyTorch/skorch not available.")
-            else:
-                enabled_dl = [m for m in dl_order if m in get_enabled_dl_models(self.config)]
-                if enabled_dl:
-                    print("\n>>> Training Deep Learning models...\n")
-                    for mk in enabled_dl:
-                        self._train_dl_model(mk)
-
-        if experiment_type in ('ml', 'all'):
-            enabled_ml = [m for m in ml_order if m in get_enabled_ml_models(self.config)]
-            if enabled_ml:
-                print("\n>>> Training Machine Learning models...\n")
-                for mk in enabled_ml:
-                    self._train_ml_model(mk)
+        ml_order = ['tabpfn', 'tabicl', 'xgb', 'svc', 'rf', 'knn', 'lr']
+        enabled_ml = [m for m in ml_order if m in get_enabled_ml_models(self.config)]
+        if enabled_ml:
+            print("\n>>> Training Machine Learning models...\n")
+            for mk in enabled_ml:
+                self._train_ml_model(mk)
 
     def _train_ml_model(self, model_key):
         model_name = get_model_name(self.config, model_key)
@@ -265,7 +226,9 @@ class Experiment:
         if load_model(self.config, model_key, self.pipelines, self.selectors, self.output_suffix):
             return
 
-        if self.config['optuna']['enabled']:
+        use_optuna = self.config['optuna']['enabled'] and model_key not in _NO_OPTUNA_MODELS
+
+        if use_optuna:
             _, pipeline, selector, _ = optimize_ml(
                 self.config, model_key, self.X_train, self.y_train, self.n_jobs,
             )
@@ -275,60 +238,20 @@ class Experiment:
             pipeline = create_ml_pipeline(self.config, model_key)
             pipeline.fit(self.X_train, self.y_train)
             self.pipelines[model_key] = pipeline
-            print("  ✓ Trained with default parameters")
+            if model_key in _NO_OPTUNA_MODELS:
+                print(f"  ✓ Trained with default parameters (Optuna skipped for {model_name})")
+            else:
+                print("  ✓ Trained with default parameters")
 
         save_model(self.config, model_key, self.pipelines[model_key],
                    self.selectors, self.output_suffix)
 
-    def _train_dl_model(self, model_key):
-        model_name = get_model_name(self.config, model_key)
-        print(f"\nTraining: {model_name}")
-
-        if load_model(self.config, model_key, self.pipelines, self.selectors, self.output_suffix):
-            return
-
-        try:
-            X_train_m, y_train_m = self._get_model_data(model_key, 'train')
-
-            if self.config['optuna']['enabled']:
-                X_val_m, y_val_m = self._get_model_data(model_key, 'val')
-                _, pipeline, selector, _ = optimize_dl(
-                    self.config, model_key, X_train_m, y_train_m, X_val_m, y_val_m,
-                )
-                self.pipelines[model_key] = pipeline
-                if selector is not None:
-                    self.selectors[model_key] = selector
-            else:
-                pipeline = create_dl_pipeline(self.config, model_key, y_train=y_train_m)
-                X_np, y_np = prepare_data_for_model(X_train_m, y_train_m, as_float32=True)
-                pipeline.fit(X_np, y_np)
-                self.pipelines[model_key] = pipeline
-                print("  ✓ Trained with default parameters")
-
-            save_model(self.config, model_key, self.pipelines[model_key],
-                       self.selectors, self.output_suffix)
-        finally:
-            free_gpu_memory()
-
     def _prepare_eval_data(self, model_key, split='test'):
-        if is_raw_dl_model(model_key):
-            raw_map = {'test': (self.X_test_raw, self.y_test_raw),
-                       'val': (self.X_val_raw, self.y_val_raw)}
-            if raw_map.get(split, (None,))[0] is not None:
-                X_raw, y_raw = raw_map[split]
-                return X_raw.astype(np.float32), y_raw
-
         data_map = {'test': (self.X_test, self.y_test), 'val': (self.X_val, self.y_val)}
         X, y = data_map[split]
 
         if model_key in self.selectors:
             X = self.selectors[model_key].transform(X)
-
-        if model_key in self.config.get('dl_models', {}):
-            if hasattr(X, 'values'):
-                X = X.values.astype(np.float32)
-            elif isinstance(X, np.ndarray):
-                X = X.astype(np.float32)
 
         return X, y
 
@@ -456,8 +379,6 @@ class Experiment:
             'config': self.config,
             'X_test': self.X_test,
             'y_test': self.y_test,
-            'X_test_raw': self.X_test_raw,
-            'y_test_raw': self.y_test_raw,
             'selectors': self.selectors,
         }
 
@@ -479,30 +400,17 @@ class Experiment:
     def run(self):
         start_time = time.time()
         start_dt = datetime.now()
-        experiment_type = self.config['experiment'].get('type', 'ml')
 
         print("\n" + "=" * 60)
         print(f"  EXPERIMENT: {self.config['experiment']['name']}")
         print(f"  ID: {self.experiment_id}")
-        print(f"  Type: {experiment_type.upper()}")
         print(f"  Start: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 60 + "\n")
 
-        needs_features = experiment_type in ('ml', 'all') or (
-            experiment_type == 'dl'
-            and self.config['deep_learning'].get('data_format') != 'raw'
-        )
-        if needs_features:
-            self.load_or_extract_features()
-            self.select_features()
+        self.load_or_extract_features()
+        self.select_features()
 
-        needs_raw = experiment_type in ('dl', 'all') and PYTORCH_AVAILABLE
-        if needs_raw:
-            raw_models = [m for m in get_enabled_dl_models(self.config) if is_raw_dl_model(m)]
-            if raw_models:
-                self.load_raw_data()
-
-        if experiment_type in ('ml', 'all') and self.config['cross_validation']['enabled']:
+        if self.config['cross_validation']['enabled']:
             self.cross_validate()
 
         self.train()
@@ -513,9 +421,7 @@ class Experiment:
         self.save_predictions()
 
         self.generate_plots()
-
-        if experiment_type in ('ml', 'all'):
-            self.generate_xai()
+        self.generate_xai()
 
         elapsed = time.time() - start_time
         h, rem = divmod(elapsed, 3600)

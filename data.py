@@ -8,7 +8,7 @@ This script executes the entire data preparation process:
 
 Usage:
     python data.py
-    
+
 Or run individual steps:
     python data.py --step conversion
     python data.py --step concat
@@ -19,9 +19,53 @@ import argparse
 import sys
 import time
 import os
+import re
 
-# Add root directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
+
+def _time_to_seconds(time_str):
+    h, m, s = map(int, re.split('[:.]', time_str))
+    return h * 3600 + m * 60 + s
+
+
+def _clip_around_seizures(df, freq_hz=100, minutes=30):
+    context_samples = minutes * 60 * freq_hz
+    seizure_series = df['Seizure']
+    seizure_indices = seizure_series[seizure_series == 1].index
+
+    if len(seizure_indices) == 0:
+        print("  No seizures detected. Returning original DataFrame without clipping.")
+        return df
+
+    # Detect continuous seizure blocks
+    seizure_diff = seizure_indices.to_series().diff().fillna(1)
+    block_ids = (seizure_diff != 1).cumsum()
+
+    # Create extended ranges with context
+    ranges = []
+    for i, (block_id, block) in enumerate(seizure_indices.to_series().groupby(block_ids), 1):
+        block = block.index if hasattr(block, 'index') else pd.Index([block])
+        start = block.min() - context_samples
+        end = block.max() + context_samples
+        start = max(start, 0)
+        end = min(end, df.index[-1])
+        print(f"    Block {i}: Clipping from index {start} to {end}")
+        ranges.append((start, end))
+
+    # Merge overlapping ranges
+    merged_ranges = []
+    for start, end in sorted(ranges):
+        if not merged_ranges or start > merged_ranges[-1][1]:
+            merged_ranges.append([start, end])
+        else:
+            merged_ranges[-1][1] = max(merged_ranges[-1][1], end)
+
+    print(f"  Ranges after merging: {len(merged_ranges)}")
+
+    clipped_df = pd.concat([df.loc[start:end] for start, end in merged_ranges])
+    print(f"  Original size: {len(df)} -> Clipped size: {len(clipped_df)} rows")
+    return clipped_df
 
 
 def run_conversion():
@@ -36,95 +80,43 @@ def run_conversion():
     print("\n" + "="*70)
     print("  STEP 1: EDF to CSV CONVERSION")
     print("="*70 + "\n")
-    
-    # Configure GPU 1 to avoid interfering with other users
+
     os.environ['CUDA_VISIBLE_DEVICES'] = '1'
     print("  Using GPU 1 (RTX 3090)")
-    
-    # Set CPU parallelization (use half of available cores)
+
     n_jobs = 16
     print(f"  Using {n_jobs} CPU cores for parallel processing\n")
-    
+
     start_time = time.time()
-    
-    # Import conversion script dependencies
+
     import mne
     import pandas as pd
     import numpy as np
-    import re
     import tqdm
     from mne.preprocessing import ICA
-    
+
     file_path_read = os.path.join("data", "raw", "siena-scalp-eeg-database-1.0.0")
     file_path_write = os.path.join("data", "raw", "csv-data")
     os.makedirs(file_path_write, exist_ok=True)
 
-    def time_to_seconds(start_time_str):
-        h, m, s = map(int, re.split('[:.]', start_time_str))
-        start_seconds = h * 3600 + m * 60 + s
-        return start_seconds
-
-    def clipping(df, freq_hz=100, minutes=30):
-        context_samples = minutes * 60 * freq_hz
-        seizure_series = df['Seizure']
-        seizure_indices = seizure_series[seizure_series == 1].index
-
-        if len(seizure_indices) == 0:
-            print("  No seizures detected. Returning original DataFrame without clipping.")
-            return df
-
-        # Detect continuous seizure blocks
-        seizure_diff = seizure_indices.to_series().diff().fillna(1)
-        block_ids = (seizure_diff != 1).cumsum()
-
-        # Create extended ranges with context
-        ranges = []
-        for i, (block_id, block) in enumerate(seizure_indices.to_series().groupby(block_ids), 1):
-            block = block.index if hasattr(block, 'index') else pd.Index([block])
-            start = block.min() - context_samples
-            end = block.max() + context_samples
-            start = max(start, 0)
-            end = min(end, df.index[-1])
-            print(f"    Block {i}: Clipping from index {start} to {end}")
-            ranges.append((start, end))
-
-        # Merge overlapping ranges
-        merged_ranges = []
-        for start, end in sorted(ranges):
-            if not merged_ranges or start > merged_ranges[-1][1]:
-                merged_ranges.append([start, end])
-            else:
-                merged_ranges[-1][1] = max(merged_ranges[-1][1], end)
-
-        print(f"  Ranges after merging: {len(merged_ranges)}")
-
-        # Clip the DataFrame
-        clipped_df = pd.concat([df.loc[start:end] for start, end in merged_ranges])
-        print(f"  Original size: {len(df)} -> Clipped size: {len(clipped_df)} rows")
-        return clipped_df
-
-    # Counters
     files_processed = 0
     files_skipped = 0
     files_failed = 0
 
-    # Process patients
-    for patient_folder in tqdm.tqdm(sorted(os.listdir(file_path_read)), desc="Procesando pacientes"):
+    for patient_folder in tqdm.tqdm(sorted(os.listdir(file_path_read)), desc="Processing patients"):
         patient_path = os.path.join(file_path_read, patient_folder)
         if not os.path.isdir(patient_path):
             continue
 
         seizures = {}
-        
-        # Search for seizures file
+
         txt_file = next((f for f in os.listdir(patient_path) if f.endswith(".txt")), None)
-        
+
         if txt_file:
             txt_path = os.path.join(patient_path, txt_file)
             with open(txt_path, "r") as f:
                 content = f.read()
-            
-            # Extract seizure information
+
             matches = re.findall(
                 r"(?:File name:\s*([\w\-.]+\.edf))?\s*"
                 r"(?:Registration start time:\s*(\d+[\.:]\d+[\.:]\d+))?\s*"
@@ -136,46 +128,43 @@ def run_conversion():
 
             for match in matches:
                 file_name, reg_start, seiz_start, seiz_end = match
-                
+
                 if not file_name:
                     file_name = txt_file.replace(".txt", ".edf")
-                    
+
                 if file_name not in seizures:
                     seizures[file_name] = []
 
-                # Convert times to seconds
                 if reg_start > seiz_start:
                     if reg_start:
-                        seiz_start_sec = abs((time_to_seconds(seiz_start.strip()) + 24*3600) - time_to_seconds(reg_start.strip()))
-                        seiz_end_sec = abs((time_to_seconds(seiz_end.strip()) + 24*3600) - time_to_seconds(reg_start.strip()))
+                        seiz_start_sec = abs((_time_to_seconds(seiz_start.strip()) + 24*3600) - _time_to_seconds(reg_start.strip()))
+                        seiz_end_sec = abs((_time_to_seconds(seiz_end.strip()) + 24*3600) - _time_to_seconds(reg_start.strip()))
                 else:
                     if reg_start:
-                        seiz_start_sec = abs(time_to_seconds(seiz_start.strip()) - time_to_seconds(reg_start.strip()))
-                        seiz_end_sec = abs(time_to_seconds(seiz_end.strip()) - time_to_seconds(reg_start.strip()))
-                
+                        seiz_start_sec = abs(_time_to_seconds(seiz_start.strip()) - _time_to_seconds(reg_start.strip()))
+                        seiz_end_sec = abs(_time_to_seconds(seiz_end.strip()) - _time_to_seconds(reg_start.strip()))
+
                 if seiz_end_sec < seiz_start_sec:
                     time_diff = abs(seiz_start_sec - seiz_end_sec)
-                else:   
+                else:
                     time_diff = abs(seiz_end_sec - seiz_start_sec)
-                    
+
                 seizures[file_name].append({
                     "start_time": seiz_start_sec,
                     "end_time": seiz_start_sec + time_diff,
                 })
 
-        # Process EDF files
         for file in os.listdir(patient_path):
             if file.endswith(".edf"):
                 edf_path = os.path.join(patient_path, file)
                 csv_patient_path = os.path.join(file_path_write, patient_folder)
                 os.makedirs(csv_patient_path, exist_ok=True)
                 csv_path = os.path.join(csv_patient_path, file.replace(".edf", "_clipped.csv"))
-                
-                # Check if file already exists
+
                 if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
                     files_skipped += 1
                     continue
-                
+
                 try:
                     raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
                     lista_canales = [ch for ch in raw.ch_names if "EEG" in ch.upper()]
@@ -197,22 +186,18 @@ def run_conversion():
                             seiz_end = seizure_info["end_time"]
                             mask = (times >= seiz_start) & (times <= seiz_end)
                             seizure_flag[mask] = 1
-                            
+
                     df.insert(1, "Seizure", seizure_flag)
                     df.insert(2, "idPatient", patient_folder)
                     df.insert(3, "idSession", file.replace(".edf", ""))
-                    
-                    # Calculate seizure duration for the first seizure in file
+
                     seizure_duration = 0
                     if file in seizures and seizures[file]:
                         seizure_duration = seizures[file][0]["end_time"] - seizures[file][0]["start_time"]
-                    
-                    # Apply clipping only if recording is long enough (60min + seizure duration)
-                    # Otherwise, keep the full recording
+
                     if df["Time (s)"].max() >= (1800 * 2 + seizure_duration):
-                        df = clipping(df, freq_hz=100, minutes=30)
-                    
-                    # Always save the file (clipped or full)
+                        df = _clip_around_seizures(df, freq_hz=100, minutes=30)
+
                     df.fillna(0, inplace=True)
                     df.to_csv(csv_path, index=False)
                     files_processed += 1
@@ -220,7 +205,7 @@ def run_conversion():
                 except Exception as e:
                     print(f"  Error processing {file}: {e}")
                     files_failed += 1
-    
+
     elapsed_time = time.time() - start_time
     print(f"\nConversion completed in {elapsed_time:.2f} seconds")
     print(f"  Files processed: {files_processed}")
@@ -240,21 +225,20 @@ def run_concat():
     print("\n" + "="*70)
     print("  STEP 2: CONCATENATION AND TRAIN/VAL/TEST SPLIT")
     print("="*70 + "\n")
-    
+
     start_time = time.time()
-    
+
     import pandas as pd
     from sklearn.model_selection import train_test_split
-    
+
     root_dir = os.path.join("data", "raw", "csv-data")
     output_dir = os.path.join("data", "processed", "dataset_clipped")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Check if files already exist
     train_path = os.path.join(output_dir, "train.csv")
     val_path = os.path.join(output_dir, "val.csv")
     test_path = os.path.join(output_dir, "test.csv")
-    
+
     if all(os.path.exists(p) and os.path.getsize(p) > 0 for p in [train_path, val_path, test_path]):
         print("  Files already exist. Skipping concatenation.")
         print(f"    - {train_path}")
@@ -270,21 +254,18 @@ def run_concat():
 
     session_dfs = {}
 
-    # Read and group by session
     print("Reading CSV files...")
     for subdir, dirs, files in os.walk(root_dir):
         for file in files:
             if file.endswith('_clipped.csv'):
                 file_path = os.path.join(subdir, file)
                 try:
-                    # Check if file is not empty
                     if os.path.getsize(file_path) == 0:
                         print(f"  Empty file, skipping: {file}")
                         continue
-                    
+
                     df = pd.read_csv(file_path)
-                    
-                    # Rename inconsistent columns
+
                     rename_dict = {}
                     cols = df.columns
                     if "EEG CZ" in cols:
@@ -305,24 +286,21 @@ def run_concat():
 
     print(f"  Total sessions found: {len(session_dfs)}")
 
-    # Group sessions by patient
     patient_sessions = {}
     for session_id, df_session in session_dfs.items():
         patient_id = df_session["idPatient"].iloc[0]
         if patient_id not in patient_sessions:
             patient_sessions[patient_id] = []
         patient_sessions[patient_id].append(session_id)
-    
+
     print(f"  Total patients found: {len(patient_sessions)}")
     for patient_id, sessions in list(patient_sessions.items())[:3]:
         print(f"    {patient_id}: {len(sessions)} sessions")
-    
-    # Split by patients (not sessions) to avoid data leakage
+
     patient_ids = list(patient_sessions.keys())
     train_patients, temp_patients = train_test_split(patient_ids, test_size=0.3, random_state=42)
     val_patients, test_patients = train_test_split(temp_patients, test_size=0.5, random_state=42)
 
-    # Get session IDs for each split
     train_ids = [sid for pid in train_patients for sid in patient_sessions[pid]]
     val_ids = [sid for pid in val_patients for sid in patient_sessions[pid]]
     test_ids = [sid for pid in test_patients for sid in patient_sessions[pid]]
@@ -332,7 +310,6 @@ def run_concat():
     print(f"    Val:   {len(val_patients)} patients ({len(val_ids)} sessions)")
     print(f"    Test:  {len(test_patients)} patients ({len(test_ids)} sessions)")
 
-    # Concatenate and save
     train_df = pd.concat([session_dfs[sid] for sid in train_ids], ignore_index=True)
     val_df = pd.concat([session_dfs[sid] for sid in val_ids], ignore_index=True)
     test_df = pd.concat([session_dfs[sid] for sid in test_ids], ignore_index=True)
@@ -357,18 +334,18 @@ def run_window():
     print("\n" + "="*70)
     print("  STEP 3: WINDOWING")
     print("="*70 + "\n")
-    
+
     start_time = time.time()
-    
+
     import pandas as pd
     from tqdm import tqdm
-    
-    def window_and_save(df, set_name, window_size=1000, overlap=0.25, out_dir='data/processed/windowed'):
+
+    def _window_and_save(df, set_name, window_size=1000, overlap=0.25, out_dir='data/processed/windowed'):
         os.makedirs(out_dir, exist_ok=True)
         step = int(window_size * (1 - overlap))
         all_windows = []
         sessions = df['idSession'].unique()
-        
+
         print(f"  [{set_name.upper()}] Windowing {len(sessions)} sessions...")
         for session_id in tqdm(sessions, desc=f"  {set_name.upper()}", leave=False):
             session_df = df[df['idSession'] == session_id].reset_index(drop=True)
@@ -377,13 +354,12 @@ def run_window():
                 window = session_df.iloc[start:start+window_size].copy()
                 window['window_id'] = f"{session_id}_{start}"
                 all_windows.append(window)
-        
+
         if all_windows:
             result = pd.concat(all_windows, ignore_index=True)
             result.to_csv(os.path.join(out_dir, f"dataset_windowed_{set_name}.csv"), index=False)
             print(f"  [{set_name.upper()}] {len(result)} rows saved")
 
-    # Parameters
     input_dir = os.path.join("data", "processed", "dataset_clipped")
     output_dir = os.path.join("data", "processed", "windowed")
     sampling_rate = 100
@@ -391,11 +367,10 @@ def run_window():
     window_size = sampling_rate * window_seconds
     overlap = 0.25
 
-    # Check if files already exist
     train_wind = os.path.join(output_dir, "dataset_windowed_train.csv")
     val_wind = os.path.join(output_dir, "dataset_windowed_val.csv")
     test_wind = os.path.join(output_dir, "dataset_windowed_test.csv")
-    
+
     if all(os.path.exists(p) and os.path.getsize(p) > 0 for p in [train_wind, val_wind, test_wind]):
         print("  Files already exist. Skipping windowing.")
         print(f"    - {train_wind}")
@@ -409,15 +384,14 @@ def run_window():
     print(f"    - Overlap: {overlap*100}%")
     print(f"    - Step: {int(window_size * (1 - overlap))} samples\n")
 
-    # Read and process datasets
     datasets = {
         "train": pd.read_csv(os.path.join(input_dir, "train.csv")),
-        "val": pd.read_csv(os.path.join(input_dir, "val.csv")),
-        "test": pd.read_csv(os.path.join(input_dir, "test.csv")),
+        "val":   pd.read_csv(os.path.join(input_dir, "val.csv")),
+        "test":  pd.read_csv(os.path.join(input_dir, "test.csv")),
     }
 
     for set_name, df in datasets.items():
-        window_and_save(df, set_name, window_size=window_size, overlap=overlap, out_dir=output_dir)
+        _window_and_save(df, set_name, window_size=window_size, overlap=overlap, out_dir=output_dir)
 
     elapsed_time = time.time() - start_time
     print(f"\nWindowing completed in {elapsed_time:.2f} seconds")
@@ -425,24 +399,24 @@ def run_window():
 
 
 def run_all():
-    """Executes the complete pipeline"""
+    """Executes the complete pipeline."""
     print("\n" + "="*70)
     print("  COMPLETE EEG DATA PROCESSING PIPELINE")
     print("="*70)
-    
+
     total_start = time.time()
-    
+
     try:
         run_conversion()
         run_concat()
         run_window()
-        
+
         total_time = time.time() - total_start
         print("\n" + "="*70)
         print("  PIPELINE COMPLETED SUCCESSFULLY")
         print(f"  Total time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
         print("="*70 + "\n")
-        
+
     except Exception as e:
         print(f"\nError in pipeline: {e}")
         import traceback
@@ -452,35 +426,33 @@ def run_all():
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Pipeline de procesamiento de datos EEG',
+        description='EEG data processing pipeline',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Ejemplos de uso:
-  python data.py                 # Ejecutar todo el pipeline
-  python data.py --step conversion  # Solo conversión
-  python data.py --step concat      # Solo concatenación
-  python data.py --step window      # Solo ventanado
+Examples:
+  python data.py                     # Run the full pipeline
+  python data.py --step conversion   # EDF to CSV only
+  python data.py --step concat       # Concatenation and split only
+  python data.py --step window       # Windowing only
         """
     )
-    
+
     parser.add_argument(
         '--step',
         choices=['conversion', 'concat', 'window', 'all'],
         default='all',
         help='Specific step to execute (default: all)'
     )
-    
+
     args = parser.parse_args()
-    
-    # Execute requested step
-    if args.step == 'all':
-        run_all()
-    elif args.step == 'conversion':
-        run_conversion()
-    elif args.step == 'concat':
-        run_concat()
-    elif args.step == 'window':
-        run_window()
+
+    steps = {
+        'all':        run_all,
+        'conversion': run_conversion,
+        'concat':     run_concat,
+        'window':     run_window,
+    }
+    steps[args.step]()
 
 
 if __name__ == "__main__":
