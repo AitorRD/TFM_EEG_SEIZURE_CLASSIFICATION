@@ -21,6 +21,9 @@ import time
 import os
 import re
 
+import pandas as pd
+import numpy as np
+
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 
@@ -29,29 +32,18 @@ def _time_to_seconds(time_str):
     return h * 3600 + m * 60 + s
 
 
-def _clip_around_seizures(df, freq_hz=100, minutes=30):
-    context_samples = minutes * 60 * freq_hz
-    seizure_series = df['Seizure']
-    seizure_indices = seizure_series[seizure_series == 1].index
+def _clip_around_seizures(df, seizure_infos, minutes=30):
+    context_seconds = minutes * 60
+    times = df['Time (s)'].values
+    t_min, t_max = times[0], times[-1]
 
-    if len(seizure_indices) == 0:
-        print("  No seizures detected. Returning original DataFrame without clipping.")
-        return df
-
-    # Detect continuous seizure blocks
-    seizure_diff = seizure_indices.to_series().diff().fillna(1)
-    block_ids = (seizure_diff != 1).cumsum()
-
-    # Create extended ranges with context
     ranges = []
-    for i, (block_id, block) in enumerate(seizure_indices.to_series().groupby(block_ids), 1):
-        block = block.index if hasattr(block, 'index') else pd.Index([block])
-        start = block.min() - context_samples
-        end = block.max() + context_samples
-        start = max(start, 0)
-        end = min(end, df.index[-1])
-        print(f"    Block {i}: Clipping from index {start} to {end}")
-        ranges.append((start, end))
+    for i, info in enumerate(seizure_infos, 1):
+        clip_start = max(info['start_time'] - context_seconds, t_min)
+        clip_end = min(info['end_time'] + context_seconds, t_max)
+        duration = clip_end - clip_start
+        print(f"    Seizure {i}: {clip_start:.1f}s – {clip_end:.1f}s ({duration/60:.1f} min)")
+        ranges.append((clip_start, clip_end))
 
     # Merge overlapping ranges
     merged_ranges = []
@@ -63,8 +55,11 @@ def _clip_around_seizures(df, freq_hz=100, minutes=30):
 
     print(f"  Ranges after merging: {len(merged_ranges)}")
 
-    clipped_df = pd.concat([df.loc[start:end] for start, end in merged_ranges])
-    print(f"  Original size: {len(df)} -> Clipped size: {len(clipped_df)} rows")
+    t = df['Time (s)']
+    clipped_df = pd.concat([
+        df[(t >= start) & (t <= end)] for start, end in merged_ranges
+    ])
+    print(f"  Original size: {len(df)} -> Clipped size: {len(clipped_df)} rows ({len(clipped_df)/100/60:.1f} min)")
     return clipped_df
 
 
@@ -90,8 +85,6 @@ def run_conversion():
     start_time = time.time()
 
     import mne
-    import pandas as pd
-    import numpy as np
     import tqdm
     from mne.preprocessing import ICA
 
@@ -161,9 +154,9 @@ def run_conversion():
                 os.makedirs(csv_patient_path, exist_ok=True)
                 csv_path = os.path.join(csv_patient_path, file.replace(".edf", "_clipped.csv"))
 
-                if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
-                    files_skipped += 1
-                    continue
+                #if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+                #    files_skipped += 1
+                #    continue
 
                 try:
                     raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
@@ -191,12 +184,9 @@ def run_conversion():
                     df.insert(2, "idPatient", patient_folder)
                     df.insert(3, "idSession", file.replace(".edf", ""))
 
-                    seizure_duration = 0
+                    # Apply clipping around seizures if seizures exist
                     if file in seizures and seizures[file]:
-                        seizure_duration = seizures[file][0]["end_time"] - seizures[file][0]["start_time"]
-
-                    if df["Time (s)"].max() >= (1800 * 2 + seizure_duration):
-                        df = _clip_around_seizures(df, freq_hz=100, minutes=30)
+                        df = _clip_around_seizures(df, seizures[file], minutes=30)
 
                     df.fillna(0, inplace=True)
                     df.to_csv(csv_path, index=False)
@@ -239,13 +229,13 @@ def run_concat():
     val_path = os.path.join(output_dir, "val.csv")
     test_path = os.path.join(output_dir, "test.csv")
 
-    if all(os.path.exists(p) and os.path.getsize(p) > 0 for p in [train_path, val_path, test_path]):
-        print("  Files already exist. Skipping concatenation.")
-        print(f"    - {train_path}")
-        print(f"    - {val_path}")
-        print(f"    - {test_path}")
-        print("\n  Use --step concat to force regeneration.\n")
-        return
+    # if all(os.path.exists(p) and os.path.getsize(p) > 0 for p in [train_path, val_path, test_path]):
+    #     print("  Files already exist. Skipping concatenation.")
+    #     print(f"    - {train_path}")
+    #     print(f"    - {val_path}")
+    #     print(f"    - {test_path}")
+    #     print("\n  Use --step concat to force regeneration.\n")
+    #     return
 
     channels = ["Time (s)", "Seizure", "idSession", "idPatient",
                 "EEG Fp1", "EEG Fp2", "EEG F7", "EEG F3", "EEG Fz", "EEG F4", "EEG F8",
@@ -371,13 +361,13 @@ def run_window():
     val_wind = os.path.join(output_dir, "dataset_windowed_val.csv")
     test_wind = os.path.join(output_dir, "dataset_windowed_test.csv")
 
-    if all(os.path.exists(p) and os.path.getsize(p) > 0 for p in [train_wind, val_wind, test_wind]):
-        print("  Files already exist. Skipping windowing.")
-        print(f"    - {train_wind}")
-        print(f"    - {val_wind}")
-        print(f"    - {test_wind}")
-        print("\n  Use --step window to force regeneration.\n")
-        return
+    # if all(os.path.exists(p) and os.path.getsize(p) > 0 for p in [train_wind, val_wind, test_wind]):
+    #     print("  Files already exist. Skipping windowing.")
+    #     print(f"    - {train_wind}")
+    #     print(f"    - {val_wind}")
+    #     print(f"    - {test_wind}")
+    #     print("\n  Use --step window to force regeneration.\n")
+    #     return
 
     print(f"  Parameters:")
     print(f"    - Window duration: {window_seconds}s ({window_size} samples)")

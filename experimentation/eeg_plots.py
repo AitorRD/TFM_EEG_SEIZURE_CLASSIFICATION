@@ -41,7 +41,7 @@ def plot_seizure_timeline(df, file_name, save_dir):
     print(f"  ✓ Timeline saved: {save_path} - Duration: {total_minutes:.2f} minutes")
 
 
-def plot_raw_eeg_traces(df, file_name, save_dir, duration_minutes=3):
+def plot_raw_eeg_traces(df, file_name, save_dir, duration_minutes=30):
     if "Seizure" not in df.columns:
         print(f"  [WARNING] 'Seizure' column not found in {file_name}")
         return
@@ -136,7 +136,7 @@ def process_all_eeg_files(data_dir="data/raw/csv-data",
                         continue
 
                     plot_seizure_timeline(df, file, timeline_dir)
-                    plot_raw_eeg_traces(df, file, traces_dir, duration_minutes=3)
+                    plot_raw_eeg_traces(df, file, traces_dir, duration_minutes=30)
 
                 except Exception as e:
                     print(f"  [ERROR] {file}: {e}")

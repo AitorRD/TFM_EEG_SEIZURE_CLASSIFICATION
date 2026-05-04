@@ -9,6 +9,8 @@ venv/
 pipeline.md
 
 /data/processed/dataset_clipped.csv
+/data/processed/loso_features/*
+/images/results/loso/loso_fold_metrics.csv
 /data/processed/dataset_clipped.zip
 /data/processed/dataset_windowed.csv
 /data/processed/dataset_with_labels.csv
@@ -43,7 +45,7 @@ pipeline.md
 /experimentation/images/results/csv/*
 /images/results/csv/*
 /images/F3/*
-
+/images/results/loso/predictions
 __pycache__/
 *.py[cod]
 *$py.class
