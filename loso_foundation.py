@@ -15,7 +15,7 @@ Outputs (under --output-dir, default images/results/loso/):
 
 Usage:
     python loso_foundation.py
-    python loso_foundation.py --model chronos2 --channel "EEG F3"
+    python loso_foundation.py --model chronos2
     python loso_foundation.py --models chronos2 moirai2 --max-windows 128
     python loso_foundation.py --model tsmixer --tsmixer-epochs 10
 """
@@ -35,6 +35,7 @@ import pandas as pd
 from sklearn.metrics import auc, confusion_matrix, roc_curve
 
 from foundation_models import (
+    EEG_CHANNELS,
     MODEL_DISPLAY_NAMES,
     SplitData,
     TSMixerForecaster,
@@ -62,7 +63,6 @@ def parse_args() -> argparse.Namespace:
         choices=["chronos2", "moirai2", "tsmixer"], default=None,
     )
 
-    p.add_argument("--channel", type=str, default="EEG F3")
     p.add_argument("--context-length", type=int, default=800)
     p.add_argument("--prediction-length", type=int, default=200)
     p.add_argument(
@@ -172,6 +172,15 @@ def parse_args() -> argparse.Namespace:
 _RENAME_COLS = {"EEG CZ": "EEG Cz", "EEG FP2": "EEG Fp2"}
 
 
+def _to_time_major_array(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float32)
+    if arr.ndim == 1:
+        return arr.reshape(-1, 1)
+    if arr.ndim == 2:
+        return arr
+    raise ValueError(f"Expected 1D or 2D array, got shape={arr.shape}")
+
+
 def _window_df(df: pd.DataFrame, window_size: int, overlap: float) -> pd.DataFrame:
     """Apply sliding window per session to a patient DataFrame."""
     step = int(window_size * (1 - overlap))
@@ -209,7 +218,12 @@ def load_and_window_patient(
     rename = {k: v for k, v in _RENAME_COLS.items() if k in df.columns}
     if rename:
         df.rename(columns=rename, inplace=True)
-    df.fillna(0, inplace=True)
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    string_cols = [c for c in df.columns if c not in numeric_cols]
+    if numeric_cols:
+        df[numeric_cols] = df[numeric_cols].fillna(0.0)
+    if string_cols:
+        df[string_cols] = df[string_cols].fillna("")
     return _window_df(df, window_size, overlap)
 
 
@@ -245,7 +259,6 @@ def load_and_window_all_patients(
 def df_to_split_data(
     split_name: str,
     df: pd.DataFrame,
-    channel: str,
     context_length: int,
     prediction_length: int,
     max_windows: int,
@@ -253,9 +266,18 @@ def df_to_split_data(
     seed: int,
 ) -> Optional[SplitData]:
     """Build a SplitData from a (pre-filtered) DataFrame. Returns None if empty."""
-    missing = {"window_id", "Seizure", channel}.difference(df.columns)
+    missing = {"window_id", "Seizure"}.difference(df.columns)
     if missing:
         raise ValueError(f"[{split_name}] Missing columns: {sorted(missing)}")
+    df = df.copy()
+
+    available_channels = [c for c in EEG_CHANNELS if c in df.columns]
+    if not available_channels:
+        raise ValueError(f"[{split_name}] No EEG channels found in input dataframe.")
+    channel_names = list(available_channels)
+    for col in channel_names:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df[channel_names] = df[channel_names].fillna(0.0)
 
     grouped = df.groupby("window_id", sort=False)
     window_ids = list(grouped.groups.keys())
@@ -273,7 +295,7 @@ def df_to_split_data(
 
     for wid in window_ids:
         g = grouped.get_group(wid)
-        values = g[channel].to_numpy(dtype=np.float32)
+        values = g[channel_names].to_numpy(dtype=np.float32)
         if len(values) < min_len:
             continue
         series[str(wid)] = values[:min_len]
@@ -286,10 +308,16 @@ def df_to_split_data(
     n_sz = sum(1 for wid in final_ids if labels[wid] == 1)
     print(
         f"    [{split_name.upper()}] {len(final_ids)} windows "
-        f"(seizure={n_sz}, non-seizure={len(final_ids) - n_sz})"
+        f"(seizure={n_sz}, non-seizure={len(final_ids) - n_sz}, "
+        f"channels={len(channel_names)})"
     )
     return SplitData(
-        split=split_name, window_ids=final_ids, series=series, labels=labels
+        split=split_name,
+        window_ids=final_ids,
+        series=series,
+        labels=labels,
+        channel_names=channel_names,
+        target_index=0,
     )
 
 
@@ -337,24 +365,44 @@ def _xai_build_segment_features(
     window_ids: List[str],
     context_length: int,
     n_segments: int,
-) -> Tuple[np.ndarray, List[str], np.ndarray]:
+) -> Tuple[np.ndarray, List[str], np.ndarray, List[str], List[str]]:
     n_segments = max(1, min(n_segments, context_length))
     segment_edges = np.linspace(0, context_length, n_segments + 1, dtype=np.int64)
-    feature_names = [f"s{idx + 1:02d}_mean" for idx in range(n_segments)]
+    segment_names = [f"s{idx + 1:02d}_mean" for idx in range(n_segments)]
 
-    X = np.zeros((len(window_ids), n_segments), dtype=np.float32)
+    if split_data.channel_names:
+        channel_names = list(split_data.channel_names)
+    else:
+        first = _to_time_major_array(split_data.series[window_ids[0]])
+        channel_names = [f"feature_{idx + 1:02d}" for idx in range(first.shape[1])]
+
+    n_channels = len(channel_names)
+    feature_names = [
+        f"{channel_names[ch_idx]}__{segment_names[seg_idx]}"
+        for ch_idx in range(n_channels)
+        for seg_idx in range(n_segments)
+    ]
+
+    X = np.zeros((len(window_ids), n_channels * n_segments), dtype=np.float32)
     for row_idx, window_id in enumerate(window_ids):
-        context = np.asarray(split_data.series[window_id][:context_length], dtype=np.float32)
-        for seg_idx in range(n_segments):
-            start = int(segment_edges[seg_idx])
-            end = int(segment_edges[seg_idx + 1])
-            if end <= start:
-                end = min(context_length, start + 1)
-            segment = context[start:end] if end > start else context[start:start + 1]
-            if segment.size == 0:
-                segment = context
-            X[row_idx, seg_idx] = float(np.mean(segment))
-    return X, feature_names, segment_edges
+        context = _to_time_major_array(split_data.series[window_id])[:context_length]
+        if context.shape[1] != n_channels:
+            raise RuntimeError(
+                f"Window {window_id}: channel count mismatch (expected {n_channels}, got {context.shape[1]})."
+            )
+        for ch_idx in range(n_channels):
+            for seg_idx in range(n_segments):
+                start = int(segment_edges[seg_idx])
+                end = int(segment_edges[seg_idx + 1])
+                if end <= start:
+                    end = min(context_length, start + 1)
+                segment = context[start:end, ch_idx]
+                if segment.size == 0:
+                    segment = context[:, ch_idx]
+                feat_idx = ch_idx * n_segments + seg_idx
+                X[row_idx, feat_idx] = float(np.mean(segment))
+
+    return X, feature_names, segment_edges, channel_names, segment_names
 
 
 def _xai_extract_future_targets(
@@ -364,9 +412,13 @@ def _xai_extract_future_targets(
     prediction_length: int,
 ) -> np.ndarray:
     futures = np.zeros((len(window_ids), prediction_length), dtype=np.float32)
+    target_index = split_data.target_index
     for row_idx, window_id in enumerate(window_ids):
-        values = np.asarray(split_data.series[window_id], dtype=np.float32)
-        target = values[context_length:context_length + prediction_length]
+        values = _to_time_major_array(split_data.series[window_id])
+        target = values[
+            context_length:context_length + prediction_length,
+            target_index,
+        ]
         if len(target) != prediction_length:
             raise RuntimeError(
                 f"Window {window_id}: expected {prediction_length} future samples, got {len(target)}."
@@ -375,19 +427,31 @@ def _xai_extract_future_targets(
     return futures
 
 
-def _xai_segment_means_to_context(
-    segment_means: np.ndarray,
+def _xai_segment_features_to_context(
+    segment_features: np.ndarray,
     segment_edges: np.ndarray,
     context_length: int,
+    n_channels: int,
 ) -> np.ndarray:
-    context = np.zeros(context_length, dtype=np.float32)
-    n_segments = min(len(segment_means), len(segment_edges) - 1)
-    for seg_idx in range(n_segments):
-        start = int(segment_edges[seg_idx])
-        end = int(segment_edges[seg_idx + 1])
-        if end <= start:
-            end = min(context_length, start + 1)
-        context[start:end] = float(segment_means[seg_idx])
+    n_segments = max(1, len(segment_edges) - 1)
+    expected = n_channels * n_segments
+    features = np.asarray(segment_features, dtype=np.float32).reshape(-1)
+    if features.size < expected:
+        padded = np.zeros(expected, dtype=np.float32)
+        padded[:features.size] = features
+        features = padded
+    elif features.size > expected:
+        features = features[:expected]
+
+    matrix = features.reshape(n_channels, n_segments)
+    context = np.zeros((context_length, n_channels), dtype=np.float32)
+    for ch_idx in range(n_channels):
+        for seg_idx in range(n_segments):
+            start = int(segment_edges[seg_idx])
+            end = int(segment_edges[seg_idx + 1])
+            if end <= start:
+                end = min(context_length, start + 1)
+            context[start:end, ch_idx] = float(matrix[ch_idx, seg_idx])
     return context
 
 
@@ -398,6 +462,8 @@ def _xai_predict_scores_with_foundation_model(
     segment_edges: np.ndarray,
     context_length: int,
     prediction_length: int,
+    n_channels: int,
+    target_index: int,
 ) -> np.ndarray:
     X_arr = np.asarray(X_segment, dtype=np.float32)
     if X_arr.ndim == 1:
@@ -409,12 +475,16 @@ def _xai_predict_scores_with_foundation_model(
 
     series_dict: Dict[str, np.ndarray] = {}
     for row_idx in range(n_rows):
-        context = _xai_segment_means_to_context(
-            X_arr[row_idx], segment_edges=segment_edges, context_length=context_length
+        context = _xai_segment_features_to_context(
+            X_arr[row_idx],
+            segment_edges=segment_edges,
+            context_length=context_length,
+            n_channels=n_channels,
         )
-        series_dict[str(row_idx)] = np.concatenate(
-            [context, future_target.astype(np.float32)], axis=0
-        ).astype(np.float32)
+        last_context = context[-1] if len(context) > 0 else np.zeros(n_channels, dtype=np.float32)
+        future_matrix = np.repeat(last_context.reshape(1, -1), prediction_length, axis=0).astype(np.float32)
+        future_matrix[:, target_index] = future_target.astype(np.float32)
+        series_dict[str(row_idx)] = np.vstack([context, future_matrix]).astype(np.float32)
 
     preds_by_id = forecaster.forecast(series_dict)
     for row_idx in range(n_rows):
@@ -427,6 +497,26 @@ def _xai_predict_scores_with_foundation_model(
         scores[row_idx] = float(np.mean(np.abs(future_target - y_pred)))
 
     return scores
+
+
+def _xai_aggregate_feature_importance(
+    feature_values: np.ndarray,
+    channel_names: List[str],
+    segment_names: List[str],
+) -> Tuple[np.ndarray, np.ndarray]:
+    n_channels = len(channel_names)
+    n_segments = len(segment_names)
+    arr = np.asarray(feature_values, dtype=np.float32).reshape(-1)
+    expected = n_channels * n_segments
+    if arr.size != expected:
+        raise RuntimeError(
+            f"Unexpected feature importance size {arr.size}; expected {expected} "
+            f"(channels={n_channels}, segments={n_segments})."
+        )
+    matrix = arr.reshape(n_channels, n_segments)
+    channel_importance = matrix.mean(axis=1).astype(np.float32)
+    segment_importance = matrix.mean(axis=0).astype(np.float32)
+    return channel_importance, segment_importance
 
 
 def _xai_plot_importance_bars(
@@ -488,10 +578,12 @@ def _xai_run_shap_for_patient(
     y_targets: np.ndarray,
     scores: np.ndarray,
     feature_names: List[str],
+    channel_names: List[str],
+    segment_names: List[str],
     segment_edges: np.ndarray,
     args: argparse.Namespace,
     patient_dir: Path,
-) -> Optional[np.ndarray]:
+) -> Optional[Dict[str, np.ndarray]]:
     try:
         import shap
     except ImportError:
@@ -531,6 +623,8 @@ def _xai_run_shap_for_patient(
                 segment_edges=segment_edges,
                 context_length=args.context_length,
                 prediction_length=args.prediction_length,
+                n_channels=len(channel_names),
+                target_index=0,
             )
 
         try:
@@ -593,7 +687,48 @@ def _xai_run_shap_for_patient(
         save_path=patient_dir / "shap_importance.csv",
         value_col="importance",
     )
-    return mean_abs
+
+    channel_imp, segment_imp = _xai_aggregate_feature_importance(
+        mean_abs,
+        channel_names=channel_names,
+        segment_names=segment_names,
+    )
+    _xai_plot_importance_bars(
+        feature_names=channel_names,
+        values=channel_imp,
+        title=f"SHAP Channel Importance - {model_name} - {patient_id}",
+        xlabel="Mean |SHAP value|",
+        save_path=patient_dir / "shap_channel_importance.png",
+        top_k=min(args.xai_top_features, len(channel_names)),
+        signed=False,
+    )
+    _xai_save_importance_csv(
+        feature_names=channel_names,
+        values=channel_imp,
+        save_path=patient_dir / "shap_channel_importance.csv",
+        value_col="importance",
+    )
+    _xai_plot_importance_bars(
+        feature_names=segment_names,
+        values=segment_imp,
+        title=f"SHAP Segment Importance - {model_name} - {patient_id}",
+        xlabel="Mean |SHAP value|",
+        save_path=patient_dir / "shap_segment_importance.png",
+        top_k=min(args.xai_top_features, len(segment_names)),
+        signed=False,
+    )
+    _xai_save_importance_csv(
+        feature_names=segment_names,
+        values=segment_imp,
+        save_path=patient_dir / "shap_segment_importance.csv",
+        value_col="importance",
+    )
+
+    return {
+        "feature": mean_abs.astype(np.float32),
+        "channel": channel_imp.astype(np.float32),
+        "segment": segment_imp.astype(np.float32),
+    }
 
 
 def _xai_run_lime_for_patient(
@@ -605,10 +740,12 @@ def _xai_run_lime_for_patient(
     y_targets: np.ndarray,
     scores: np.ndarray,
     feature_names: List[str],
+    channel_names: List[str],
+    segment_names: List[str],
     segment_edges: np.ndarray,
     args: argparse.Namespace,
     patient_dir: Path,
-) -> Optional[np.ndarray]:
+) -> Optional[Dict[str, np.ndarray]]:
     try:
         import lime.lime_tabular
     except ImportError:
@@ -642,6 +779,8 @@ def _xai_run_lime_for_patient(
                 segment_edges=segment_edges,
                 context_length=args.context_length,
                 prediction_length=args.prediction_length,
+                n_channels=len(channel_names),
+                target_index=0,
             )
 
         exp = explainer.explain_instance(
@@ -692,7 +831,62 @@ def _xai_run_lime_for_patient(
     lime_csv = patient_dir / "lime_importance.csv"
     df_lime.to_csv(lime_csv, index=False)
     print(f"    XAI CSV saved: {lime_csv}")
-    return avg_abs
+
+    channel_signed, segment_signed = _xai_aggregate_feature_importance(
+        avg_signed,
+        channel_names=channel_names,
+        segment_names=segment_names,
+    )
+    channel_abs = np.abs(channel_signed).astype(np.float32)
+    segment_abs = np.abs(segment_signed).astype(np.float32)
+
+    _xai_plot_importance_bars(
+        feature_names=channel_names,
+        values=channel_signed,
+        title=f"LIME Channel Importance - {model_name} - {patient_id}",
+        xlabel="Mean local contribution (negative to positive)",
+        save_path=patient_dir / "lime_channel_importance.png",
+        top_k=min(args.xai_top_features, len(channel_names)),
+        signed=True,
+    )
+    pd.DataFrame(
+        {
+            "feature": channel_names,
+            "importance": channel_abs,
+            "signed_importance": channel_signed.astype(np.float32),
+        }
+    ).sort_values(by="importance", ascending=False).to_csv(
+        patient_dir / "lime_channel_importance.csv",
+        index=False,
+    )
+    print(f"    XAI CSV saved: {patient_dir / 'lime_channel_importance.csv'}")
+
+    _xai_plot_importance_bars(
+        feature_names=segment_names,
+        values=segment_signed,
+        title=f"LIME Segment Importance - {model_name} - {patient_id}",
+        xlabel="Mean local contribution (negative to positive)",
+        save_path=patient_dir / "lime_segment_importance.png",
+        top_k=min(args.xai_top_features, len(segment_names)),
+        signed=True,
+    )
+    pd.DataFrame(
+        {
+            "feature": segment_names,
+            "importance": segment_abs,
+            "signed_importance": segment_signed.astype(np.float32),
+        }
+    ).sort_values(by="importance", ascending=False).to_csv(
+        patient_dir / "lime_segment_importance.csv",
+        index=False,
+    )
+    print(f"    XAI CSV saved: {patient_dir / 'lime_segment_importance.csv'}")
+
+    return {
+        "feature": avg_abs.astype(np.float32),
+        "channel": channel_abs,
+        "segment": segment_abs,
+    }
 
 
 def _xai_run_embedded_tsmixer_for_patient(
@@ -703,10 +897,13 @@ def _xai_run_embedded_tsmixer_for_patient(
     window_ids: List[str],
     args: argparse.Namespace,
     patient_dir: Path,
-) -> Optional[np.ndarray]:
+) -> Optional[Dict[str, np.ndarray]]:
     subset_series = {wid: split_data.series[wid] for wid in window_ids}
-    saliency, _ = forecaster.explain_saliency(subset_series, max_samples=args.xai_max_samples)
-    saliency = saliency[:args.context_length].astype(np.float32)
+    time_saliency, channel_saliency, _ = forecaster.explain_saliency(
+        subset_series,
+        max_samples=args.xai_max_samples,
+    )
+    saliency = time_saliency[:args.context_length].astype(np.float32)
 
     x_axis = np.arange(1, len(saliency) + 1)
     plt.figure(figsize=(10, 5))
@@ -726,7 +923,34 @@ def _xai_run_embedded_tsmixer_for_patient(
         {"timestep": np.arange(1, len(saliency) + 1), "importance": saliency}
     ).to_csv(saliency_csv, index=False)
     print(f"    XAI CSV saved: {saliency_csv}")
-    return saliency
+
+    if split_data.channel_names:
+        channel_names = list(split_data.channel_names)
+    else:
+        channel_names = [f"feature_{idx + 1:02d}" for idx in range(len(channel_saliency))]
+    channel_saliency = np.asarray(channel_saliency, dtype=np.float32)[: len(channel_names)]
+
+    _xai_plot_importance_bars(
+        feature_names=channel_names,
+        values=channel_saliency,
+        title=f"Embedded Channel Saliency - {model_name} - {patient_id}",
+        xlabel="Mean absolute gradient",
+        save_path=patient_dir / "embedded_channel_saliency.png",
+        top_k=min(args.xai_top_features, len(channel_names)),
+        signed=False,
+    )
+    pd.DataFrame(
+        {"feature": channel_names, "importance": channel_saliency}
+    ).sort_values(by="importance", ascending=False).to_csv(
+        patient_dir / "embedded_channel_saliency.csv",
+        index=False,
+    )
+    print(f"    XAI CSV saved: {patient_dir / 'embedded_channel_saliency.csv'}")
+
+    return {
+        "time": saliency,
+        "channel": channel_saliency,
+    }
 
 
 def run_fold_xai(
@@ -738,7 +962,7 @@ def run_fold_xai(
     test_ids: List[str],
     test_scores: np.ndarray,
     args: argparse.Namespace,
-) -> Dict[str, np.ndarray]:
+) -> Dict[str, Any]:
     if not args.xai_enabled:
         return {}
 
@@ -746,7 +970,7 @@ def run_fold_xai(
     patient_dir = xai_root / model_key / "patients" / patient_id
     patient_dir.mkdir(parents=True, exist_ok=True)
 
-    X_full, feature_names, segment_edges = _xai_build_segment_features(
+    X_full, feature_names, segment_edges, channel_names, segment_names = _xai_build_segment_features(
         split_data=test_data,
         window_ids=test_ids,
         context_length=args.context_length,
@@ -775,7 +999,13 @@ def run_fold_xai(
 
     print(f"    Running XAI for patient {patient_id}...")
     method_set = set(args.xai_methods)
-    out: Dict[str, np.ndarray] = {}
+    out: Dict[str, Any] = {
+        "_meta": {
+            "feature_names": feature_names,
+            "channel_names": channel_names,
+            "segment_names": segment_names,
+        }
+    }
 
     if "shap" in method_set:
         shap_imp = _xai_run_shap_for_patient(
@@ -787,6 +1017,8 @@ def run_fold_xai(
             y_targets=y_targets,
             scores=scores,
             feature_names=feature_names,
+            channel_names=channel_names,
+            segment_names=segment_names,
             segment_edges=segment_edges,
             args=args,
             patient_dir=patient_dir,
@@ -804,6 +1036,8 @@ def run_fold_xai(
             y_targets=y_targets,
             scores=scores,
             feature_names=feature_names,
+            channel_names=channel_names,
+            segment_names=segment_names,
             segment_edges=segment_edges,
             args=args,
             patient_dir=patient_dir,
@@ -837,7 +1071,11 @@ def run_fold_xai(
             "model": [model_name],
             "num_test_windows": [len(test_ids)],
             "num_xai_windows": [len(selected_idx)],
-            "xai_methods": [",".join(sorted(out.keys())) if out else ""],
+            "xai_methods": [
+                ",".join(sorted(k for k in out.keys() if not k.startswith("_")))
+                if out
+                else ""
+            ],
         }
     ).to_csv(meta_path, index=False)
     return out
@@ -855,50 +1093,78 @@ def save_global_xai_averages(
     xai_root = Path(args.xai_dir) if args.xai_dir else Path(args.output_dir) / "xai"
     global_dir = xai_root / model_key / "global"
     global_dir.mkdir(parents=True, exist_ok=True)
+    meta = None
+    for res in fold_results:
+        xai = res.get("xai")
+        if isinstance(xai, dict) and "_meta" in xai:
+            meta = xai["_meta"]
+            break
+    if meta is None:
+        return
 
-    feature_names = [f"s{idx + 1:02d}_mean" for idx in range(max(1, min(args.xai_segments, args.context_length)))]
+    feature_names = list(meta.get("feature_names", []))
+    channel_names = list(meta.get("channel_names", []))
+    segment_names = list(meta.get("segment_names", []))
+
+    dim_to_names = {
+        "feature": feature_names,
+        "channel": channel_names,
+        "segment": segment_names,
+    }
 
     for method in ["shap", "lime"]:
-        per_patient = [
-            r["xai"][method]
-            for r in fold_results
-            if isinstance(r.get("xai"), dict) and method in r["xai"]
-        ]
-        if not per_patient:
-            continue
+        for dim, names in dim_to_names.items():
+            if not names:
+                continue
+            per_patient = [
+                r["xai"][method][dim]
+                for r in fold_results
+                if isinstance(r.get("xai"), dict)
+                and method in r["xai"]
+                and isinstance(r["xai"][method], dict)
+                and dim in r["xai"][method]
+            ]
+            if not per_patient:
+                continue
 
-        matrix = np.vstack(per_patient).astype(np.float32)
-        mean_importance = matrix.mean(axis=0)
-        std_importance = matrix.std(axis=0)
+            matrix = np.vstack(per_patient).astype(np.float32)
+            mean_importance = matrix.mean(axis=0)
+            std_importance = matrix.std(axis=0)
 
-        df = pd.DataFrame(
-            {
-                "feature": feature_names,
-                "mean_importance": mean_importance,
-                "std_importance": std_importance,
-            }
-        ).sort_values(by="mean_importance", ascending=False).reset_index(drop=True)
-        csv_path = global_dir / f"{method}_importance_mean.csv"
-        df.to_csv(csv_path, index=False)
-        print(f"  XAI global CSV saved: {csv_path}")
+            suffix = "" if dim == "feature" else f"_{dim}"
+            csv_path = global_dir / f"{method}{suffix}_importance_mean.csv"
+            pd.DataFrame(
+                {
+                    "feature": names,
+                    "mean_importance": mean_importance,
+                    "std_importance": std_importance,
+                }
+            ).sort_values(by="mean_importance", ascending=False).reset_index(drop=True).to_csv(
+                csv_path,
+                index=False,
+            )
+            print(f"  XAI global CSV saved: {csv_path}")
 
-        _xai_plot_importance_bars(
-            feature_names=feature_names,
-            values=mean_importance,
-            title=f"{method.upper()} Mean Importance - {model_name} (all patients)",
-            xlabel="Mean importance across patients",
-            save_path=global_dir / f"{method}_importance_mean.png",
-            top_k=args.xai_top_features,
-            signed=False,
-        )
+            _xai_plot_importance_bars(
+                feature_names=names,
+                values=mean_importance,
+                title=f"{method.upper()} Mean {dim.capitalize()} Importance - {model_name}",
+                xlabel="Mean importance across patients",
+                save_path=global_dir / f"{method}{suffix}_importance_mean.png",
+                top_k=min(args.xai_top_features, len(names)),
+                signed=False,
+            )
 
-    per_patient_embedded = [
-        r["xai"]["embedded"]
+    per_patient_embedded_time = [
+        r["xai"]["embedded"]["time"]
         for r in fold_results
-        if isinstance(r.get("xai"), dict) and "embedded" in r["xai"]
+        if isinstance(r.get("xai"), dict)
+        and "embedded" in r["xai"]
+        and isinstance(r["xai"]["embedded"], dict)
+        and "time" in r["xai"]["embedded"]
     ]
-    if per_patient_embedded:
-        matrix = np.vstack(per_patient_embedded).astype(np.float32)
+    if per_patient_embedded_time:
+        matrix = np.vstack(per_patient_embedded_time).astype(np.float32)
         mean_saliency = matrix.mean(axis=0)
         std_saliency = matrix.std(axis=0)
         timesteps = np.arange(1, len(mean_saliency) + 1)
@@ -931,6 +1197,43 @@ def save_global_xai_averages(
         plt.close()
         print(f"  XAI global plot saved: {plot_path}")
 
+    if channel_names:
+        per_patient_embedded_channel = [
+            r["xai"]["embedded"]["channel"]
+            for r in fold_results
+            if isinstance(r.get("xai"), dict)
+            and "embedded" in r["xai"]
+            and isinstance(r["xai"]["embedded"], dict)
+            and "channel" in r["xai"]["embedded"]
+        ]
+        if per_patient_embedded_channel:
+            matrix = np.vstack(per_patient_embedded_channel).astype(np.float32)
+            mean_channel = matrix.mean(axis=0)
+            std_channel = matrix.std(axis=0)
+
+            csv_path = global_dir / "embedded_channel_saliency_mean.csv"
+            pd.DataFrame(
+                {
+                    "feature": channel_names,
+                    "mean_importance": mean_channel,
+                    "std_importance": std_channel,
+                }
+            ).sort_values(by="mean_importance", ascending=False).reset_index(drop=True).to_csv(
+                csv_path,
+                index=False,
+            )
+            print(f"  XAI global CSV saved: {csv_path}")
+
+            _xai_plot_importance_bars(
+                feature_names=channel_names,
+                values=mean_channel,
+                title=f"Embedded Channel Saliency Mean - {model_name} (all patients)",
+                xlabel="Mean absolute gradient",
+                save_path=global_dir / "embedded_channel_saliency_mean.png",
+                top_k=min(args.xai_top_features, len(channel_names)),
+                signed=False,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Per-fold execution
@@ -952,13 +1255,13 @@ def run_fold(
     """
     # Test split: entire left-out patient, no window limit
     test_data = df_to_split_data(
-        "test", test_df, args.channel,
+        "test", test_df,
         args.context_length, args.prediction_length,
         max_windows=0, window_order="first", seed=args.seed,
     )
     # Val split: all other patients, limited by --max-windows for efficiency
     val_data = df_to_split_data(
-        "val", val_df, args.channel,
+        "val", val_df,
         args.context_length, args.prediction_length,
         max_windows=args.max_windows,
         window_order=args.window_order,
@@ -988,7 +1291,7 @@ def run_fold(
             device=args.tsmixer_device,
         )
         train_data = df_to_split_data(
-            "train", val_df, args.channel,
+            "train", val_df,
             args.context_length, args.prediction_length,
             max_windows=args.max_windows,
             window_order=args.window_order,
@@ -1223,7 +1526,7 @@ def main() -> None:
     print("  LOSO — FOUNDATION MODELS — EEG SEIZURE CLASSIFICATION")
     print("=" * 60)
     print(f"  Models         : {', '.join(MODEL_DISPLAY_NAMES[m] for m in models)}")
-    print(f"  Channel        : {args.channel}")
+    print("  Channels       : all available EEG channels")
     print(f"  Context length : {args.context_length}")
     print(f"  Pred. length   : {args.prediction_length}")
     print(f"  Max val windows: {args.max_windows if args.max_windows > 0 else 'all'}")

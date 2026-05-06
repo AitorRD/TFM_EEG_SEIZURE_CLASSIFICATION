@@ -47,6 +47,12 @@ MODEL_DISPLAY_NAMES = {
     "tsmixer": "TSMixer (Google-style)",
 }
 
+EEG_CHANNELS = [
+    "EEG Fp1", "EEG Fp2", "EEG F7", "EEG F3", "EEG Fz", "EEG F4", "EEG F8",
+    "EEG T3", "EEG C3", "EEG Cz", "EEG C4", "EEG T4", "EEG T5", "EEG P3",
+    "EEG Pz", "EEG P4", "EEG T6", "EEG O1", "EEG O2",
+]
+
 
 @dataclass
 class SplitData:
@@ -54,6 +60,36 @@ class SplitData:
     window_ids: List[str]
     series: Dict[str, np.ndarray]
     labels: Dict[str, int]
+    channel_names: List[str] | None = None
+    target_index: int = 0
+
+
+def _as_time_major_array(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float32)
+    if arr.ndim == 1:
+        return arr.reshape(-1, 1)
+    if arr.ndim == 2:
+        return arr
+    raise ValueError(f"Expected 1D or 2D time series, got shape {arr.shape}.")
+
+
+def _select_target_window(
+    values: np.ndarray,
+    start: int,
+    length: int,
+    target_index: int = 0,
+) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float32)
+    end = start + length
+    if arr.ndim == 1:
+        return arr[start:end]
+    if arr.ndim == 2:
+        if target_index < 0 or target_index >= arr.shape[1]:
+            raise IndexError(
+                f"target_index={target_index} out of bounds for {arr.shape[1]} channels."
+            )
+        return arr[start:end, target_index]
+    raise ValueError(f"Expected 1D or 2D time series, got shape {arr.shape}.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -276,6 +312,17 @@ def load_split_data(
     if missing:
         raise ValueError(f"[{split}] Missing required columns: {sorted(missing)}")
 
+    available_channels = [c for c in EEG_CHANNELS if c in df.columns]
+    if channel not in available_channels:
+        raise ValueError(
+            f"[{split}] Target channel {channel!r} not found in available EEG columns."
+        )
+    channel_names = [channel] + [c for c in available_channels if c != channel]
+
+    for col in channel_names:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df[channel_names] = df[channel_names].fillna(0.0)
+
     grouped = df.groupby("window_id", sort=False)
     window_ids = list(grouped.groups.keys())
 
@@ -292,7 +339,7 @@ def load_split_data(
 
     for window_id in window_ids:
         g = grouped.get_group(window_id)
-        values = g[channel].to_numpy(dtype=np.float32)
+        values = g[channel_names].to_numpy(dtype=np.float32)
 
         if len(values) < min_len:
             continue
@@ -309,10 +356,18 @@ def load_split_data(
 
     print(
         f"[{split.upper()}] Loaded {len(final_ids)} windows from {csv_path} "
-        f"(channel={channel}, ctx={context_length}, pred={prediction_length})"
+        f"(target={channel}, covariates={len(channel_names) - 1}, "
+        f"ctx={context_length}, pred={prediction_length})"
     )
 
-    return SplitData(split=split, window_ids=final_ids, series=series, labels=labels)
+    return SplitData(
+        split=split,
+        window_ids=final_ids,
+        series=series,
+        labels=labels,
+        channel_names=channel_names,
+        target_index=0,
+    )
 
 
 def _get_pred_column(df_pred: pd.DataFrame) -> str:
@@ -331,15 +386,17 @@ def _get_pred_column(df_pred: pd.DataFrame) -> str:
 def _build_context_df(series_dict: Dict[str, np.ndarray], context_length: int) -> pd.DataFrame:
     rows: List[dict] = []
     for sid, values in series_dict.items():
-        context = values[:context_length]
-        rows.extend(
-            {
+        context = _as_time_major_array(values)[:context_length]
+        n_features = context.shape[1]
+        for t in range(len(context)):
+            row = {
                 "id": sid,
                 "timestamp": t,
-                "target": float(v),
+                "target": float(context[t, 0]),
             }
-            for t, v in enumerate(context)
-        )
+            for feat_idx in range(1, n_features):
+                row[f"cov_{feat_idx:02d}"] = float(context[t, feat_idx])
+            rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -378,6 +435,8 @@ class Chronos2Forecaster:
 
     def forecast(self, series_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         context_df = _build_context_df(series_dict, self.context_length)
+        if context_df.empty:
+            return {}
 
         pred_df = self.pipeline.predict_df(
             context_df,
@@ -387,6 +446,8 @@ class Chronos2Forecaster:
             target="target",
             quantile_levels=[0.5],
         )
+        if "target_name" in pred_df.columns:
+            pred_df = pred_df[pred_df["target_name"] == "target"]
 
         pred_col = _get_pred_column(pred_df)
         preds_by_id: Dict[str, np.ndarray] = {}
@@ -408,7 +469,7 @@ class Moirai2Forecaster:
         batch_size: int,
     ):
         try:
-            from gluonts.dataset.pandas import PandasDataset
+            from gluonts.dataset.common import ListDataset
             from gluonts.dataset.split import split
         except ImportError as exc:
             raise ImportError(
@@ -425,7 +486,7 @@ class Moirai2Forecaster:
                     "uni2ts with Moirai2 is not installed. Run: pip install uni2ts"
                 ) from exc
 
-        self.PandasDataset = PandasDataset
+        self.ListDataset = ListDataset
         self.split = split
         self.Moirai2Forecast = Moirai2Forecast
 
@@ -436,14 +497,29 @@ class Moirai2Forecaster:
 
     def forecast(self, series_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         ordered_ids = list(series_dict.keys())
-        wide_df = pd.DataFrame({sid: series_dict[sid] for sid in ordered_ids})
-        wide_df.index = pd.date_range(
-            start="2000-01-01",
-            periods=len(wide_df),
-            freq="10ms",
-        )
+        if not ordered_ids:
+            return {}
 
-        ds = self.PandasDataset(dict(wide_df))
+        first_arr = _as_time_major_array(series_dict[ordered_ids[0]])
+        target_dim = int(first_arr.shape[1])
+
+        entries = []
+        for sid in ordered_ids:
+            arr = _as_time_major_array(series_dict[sid])
+            if arr.shape[1] != target_dim:
+                raise ValueError(
+                    "Moirai2 received mixed channel counts across windows: "
+                    f"expected {target_dim}, got {arr.shape[1]} for {sid}."
+                )
+            entries.append(
+                {
+                    "start": pd.Period("2000-01-01", freq="10ms"),
+                    "target": arr.T.astype(np.float32),  # [target_dim, time]
+                    "item_id": sid,
+                }
+            )
+
+        ds = self.ListDataset(entries, freq="10ms")
 
         _, test_template = self.split(ds, offset=-self.prediction_length)
         test_data = test_template.generate_instances(
@@ -456,11 +532,11 @@ class Moirai2Forecaster:
             module=self.module,
             prediction_length=self.prediction_length,
             context_length=self.context_length,
-            target_dim=1,
-            feat_dynamic_real_dim=getattr(ds, "num_feat_dynamic_real", 0),
-            past_feat_dynamic_real_dim=getattr(ds, "num_past_feat_dynamic_real", 0),
+            target_dim=target_dim,
+            feat_dynamic_real_dim=0,
+            past_feat_dynamic_real_dim=0,
         )
-        predictor = model.create_predictor(batch_size=self.batch_size)
+        predictor = model.create_predictor(batch_size=self.batch_size, device="cpu")
 
         inputs = list(test_data.input)
         forecasts = list(predictor.predict(inputs))
@@ -470,13 +546,26 @@ class Moirai2Forecaster:
             if idx >= len(ordered_ids):
                 break
 
-            sid = ordered_ids[idx]
+            sid = str(getattr(forecast, "item_id", ordered_ids[idx]))
             if hasattr(forecast, "quantile"):
-                pred_values = np.asarray(forecast.quantile(0.5), dtype=np.float32)
+                raw_pred = np.asarray(forecast.quantile(0.5), dtype=np.float32)
             elif hasattr(forecast, "mean"):
-                pred_values = np.asarray(forecast.mean, dtype=np.float32)
+                raw_pred = np.asarray(forecast.mean, dtype=np.float32)
             else:
                 raise RuntimeError("Unsupported forecast object returned by Moirai2")
+
+            if raw_pred.ndim == 1:
+                pred_values = raw_pred[: self.prediction_length]
+            elif raw_pred.ndim == 2:
+                # Handle both [horizon, dim] and [dim, horizon] forecast layouts.
+                if raw_pred.shape[0] == self.prediction_length:
+                    pred_values = raw_pred[: self.prediction_length, 0]
+                elif raw_pred.shape[1] == self.prediction_length:
+                    pred_values = raw_pred[0, : self.prediction_length]
+                else:
+                    continue
+            else:
+                continue
 
             if len(pred_values) >= self.prediction_length:
                 preds_by_id[sid] = pred_values[: self.prediction_length]
@@ -521,11 +610,14 @@ class TSMixerForecaster:
         self.num_blocks = num_blocks
         self.val_ratio = max(0.0, min(0.5, val_ratio))
         self.seed = seed
+        self.n_features: int | None = None
         self.model = None
         self._is_fitted = False
 
     def _build_model(self):
         tf = self.tf
+        if self.n_features is None:
+            raise RuntimeError("TSMixer feature dimension is unknown. Call fit() first.")
 
         def mixer_block(x):
             # Time-mixing MLP over sequence dimension.
@@ -541,10 +633,10 @@ class TSMixerForecaster:
             y = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
             y = tf.keras.layers.Dense(self.hidden_dim, activation="gelu")(y)
             y = tf.keras.layers.Dropout(self.dropout)(y)
-            y = tf.keras.layers.Dense(1)(y)
+            y = tf.keras.layers.Dense(self.n_features)(y)
             return tf.keras.layers.Add()([x, y])
 
-        inputs = tf.keras.Input(shape=(self.context_length, 1))
+        inputs = tf.keras.Input(shape=(self.context_length, self.n_features))
         x = inputs
         for _ in range(self.num_blocks):
             x = mixer_block(x)
@@ -568,13 +660,25 @@ class TSMixerForecaster:
         ys: List[np.ndarray] = []
 
         min_len = self.context_length + self.prediction_length
+        expected_features: int | None = None
         for sid, values in series_dict.items():
-            arr = np.asarray(values, dtype=np.float32)
+            arr = _as_time_major_array(values)
             if len(arr) < min_len:
                 continue
+            if expected_features is None:
+                expected_features = int(arr.shape[1])
+            if arr.shape[1] != expected_features:
+                raise ValueError(
+                    "TSMixer received mixed channel counts across windows: "
+                    f"expected {expected_features}, got {arr.shape[1]} for {sid}."
+                )
+
             x = arr[: self.context_length]
-            y = arr[self.context_length : self.context_length + self.prediction_length]
-            xs.append(x[:, None])
+            y = arr[
+                self.context_length : self.context_length + self.prediction_length,
+                0,
+            ]
+            xs.append(x)
             ys.append(y)
             ids.append(sid)
 
@@ -588,6 +692,7 @@ class TSMixerForecaster:
         tf.keras.utils.set_random_seed(self.seed)
 
         X, y, _ = self._to_xy(series_dict)
+        self.n_features = int(X.shape[2])
         self.model = self._build_model()
 
         callbacks = [
@@ -626,6 +731,10 @@ class TSMixerForecaster:
             raise RuntimeError("TSMixer model is not fitted. Call fit() first.")
 
         X, _, ids = self._to_xy(series_dict)
+        if self.n_features is not None and int(X.shape[2]) != self.n_features:
+            raise ValueError(
+                f"TSMixer expected {self.n_features} channels at inference, got {X.shape[2]}."
+            )
         preds = self.model.predict(X, batch_size=self.batch_size, verbose=0)
 
         preds_by_id: Dict[str, np.ndarray] = {}
@@ -640,7 +749,7 @@ class TSMixerForecaster:
         self,
         series_dict: Dict[str, np.ndarray],
         max_samples: int,
-    ) -> Tuple[np.ndarray, List[str]]:
+    ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
         if not self._is_fitted or self.model is None:
             raise RuntimeError("TSMixer model is not fitted. Call fit() before XAI.")
 
@@ -666,9 +775,11 @@ class TSMixerForecaster:
         if grads is None:
             raise RuntimeError("TSMixer saliency gradient is None.")
 
-        gradients = grads.numpy()[:, :, 0]
-        mean_abs_saliency = np.mean(np.abs(gradients), axis=0).astype(np.float32)
-        return mean_abs_saliency, ids
+        gradients = grads.numpy()
+        abs_grads = np.abs(gradients)
+        mean_abs_time = np.mean(abs_grads, axis=(0, 2)).astype(np.float32)
+        mean_abs_feature = np.mean(abs_grads, axis=(0, 1)).astype(np.float32)
+        return mean_abs_time, mean_abs_feature, ids
 
 
 def build_scores(
@@ -687,7 +798,12 @@ def build_scores(
             continue
 
         values = split_data.series[sid]
-        y_future = values[context_length : context_length + prediction_length]
+        y_future = _select_target_window(
+            values=values,
+            start=context_length,
+            length=prediction_length,
+            target_index=split_data.target_index,
+        )
         y_pred = np.asarray(pred, dtype=np.float32)[:prediction_length]
 
         if len(y_future) != prediction_length or len(y_pred) != prediction_length:
@@ -813,10 +929,13 @@ def _build_segment_features(
 
     X = np.zeros((len(window_ids), n_segments), dtype=np.float32)
     for row_idx, window_id in enumerate(window_ids):
-        context = np.asarray(
-            split_data.series[window_id][:context_length],
-            dtype=np.float32,
+        context = _select_target_window(
+            values=split_data.series[window_id],
+            start=0,
+            length=context_length,
+            target_index=split_data.target_index,
         )
+        context = np.asarray(context, dtype=np.float32)
 
         for seg_idx in range(n_segments):
             start = int(segment_edges[seg_idx])
@@ -896,8 +1015,13 @@ def _extract_future_targets(
 ) -> np.ndarray:
     futures = np.zeros((len(window_ids), prediction_length), dtype=np.float32)
     for row_idx, window_id in enumerate(window_ids):
-        values = np.asarray(split_data.series[window_id], dtype=np.float32)
-        target = values[context_length : context_length + prediction_length]
+        values = split_data.series[window_id]
+        target = _select_target_window(
+            values=values,
+            start=context_length,
+            length=prediction_length,
+            target_index=split_data.target_index,
+        )
         if len(target) != prediction_length:
             raise RuntimeError(
                 f"Window {window_id} has invalid future length for XAI "
@@ -1195,7 +1319,7 @@ def _run_tsmixer_embedded_xai(
     max_samples: int,
 ) -> None:
     subset_series = {window_id: split_data.series[window_id] for window_id in window_ids}
-    saliency, _ = forecaster.explain_saliency(subset_series, max_samples=max_samples)
+    saliency, _, _ = forecaster.explain_saliency(subset_series, max_samples=max_samples)
 
     x_axis = np.arange(1, min(context_length, len(saliency)) + 1)
     y_values = saliency[: len(x_axis)]
