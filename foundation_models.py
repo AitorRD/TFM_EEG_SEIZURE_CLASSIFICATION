@@ -8,10 +8,12 @@ Workflow:
 4) Convert forecast error (MAE over prediction horizon) into seizure scores.
 5) Tune threshold on validation split and evaluate classification on test split.
 6) Save predictions CSV and a metrics table image with model names.
+7) (Optional) Run post-hoc XAI (SHAP/LIME over the trained foundation model + embedded TSMixer saliency).
 
 Examples:
     python foundation_models.py --models chronos2 moirai2 --channel "EEG F3"
     python foundation_models.py --model chronos2 --channel "EEG C3" --max-windows 256
+    python foundation_models.py --model tsmixer --xai-enabled --xai-methods shap lime embedded
 """
 
 from __future__ import annotations
@@ -176,6 +178,66 @@ def parse_args() -> argparse.Namespace:
         choices=["cpu", "gpu"],
         help="Execution device for TSMixer (cpu disables CUDA before TensorFlow import)",
     )
+    parser.add_argument(
+        "--xai-enabled",
+        action="store_true",
+        help="Enable post-hoc XAI plots for foundation models",
+    )
+    parser.add_argument(
+        "--xai-methods",
+        nargs="+",
+        default=["shap", "lime", "embedded"],
+        choices=["shap", "lime", "embedded"],
+        help="XAI methods to run (subset of: shap, lime, embedded)",
+    )
+    parser.add_argument(
+        "--xai-dir",
+        type=str,
+        default="images/xai/foundation",
+        help="Output directory for XAI plots",
+    )
+    parser.add_argument(
+        "--xai-segments",
+        type=int,
+        default=20,
+        help="Number of context segments used by SHAP/LIME perturbations",
+    )
+    parser.add_argument(
+        "--xai-max-samples",
+        type=int,
+        default=256,
+        help="Max windows used for direct SHAP/LIME explainability",
+    )
+    parser.add_argument(
+        "--xai-top-features",
+        type=int,
+        default=10,
+        help="Top features displayed in SHAP/LIME plots",
+    )
+    parser.add_argument(
+        "--xai-lime-instances",
+        type=int,
+        default=24,
+        help="Number of test windows explained by SHAP/LIME",
+    )
+    parser.add_argument(
+        "--xai-lime-perturbations",
+        type=int,
+        default=1000,
+        help="Synthetic samples used by each LIME local explanation",
+    )
+    parser.add_argument(
+        "--xai-shap-background",
+        type=int,
+        default=24,
+        help="Background windows used by SHAP KernelExplainer",
+    )
+    parser.add_argument(
+        "--xai-shap-nsamples",
+        type=int,
+        default=128,
+        help="Kernel SHAP evaluation budget per explained window",
+    )
 
     return parser.parse_args()
 
@@ -296,9 +358,23 @@ class Chronos2Forecaster:
                 "chronos-forecasting is not installed. Run: pip install chronos-forecasting"
             ) from exc
 
+        resolved_device = str(device).lower().strip()
+        if resolved_device == "cuda":
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    print("  [INFO] CUDA requested for Chronos2 but not available. Falling back to CPU.")
+                    resolved_device = "cpu"
+            except Exception:
+                print("  [INFO] Could not validate CUDA availability. Falling back to CPU for Chronos2.")
+                resolved_device = "cpu"
+
         self.context_length = context_length
         self.prediction_length = prediction_length
-        self.pipeline = Chronos2Pipeline.from_pretrained(model_id, device_map=device)
+        self.pipeline = Chronos2Pipeline.from_pretrained(
+            model_id,
+            device_map=resolved_device,
+        )
 
     def forecast(self, series_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         context_df = _build_context_df(series_dict, self.context_length)
@@ -560,6 +636,40 @@ class TSMixerForecaster:
 
         return preds_by_id
 
+    def explain_saliency(
+        self,
+        series_dict: Dict[str, np.ndarray],
+        max_samples: int,
+    ) -> Tuple[np.ndarray, List[str]]:
+        if not self._is_fitted or self.model is None:
+            raise RuntimeError("TSMixer model is not fitted. Call fit() before XAI.")
+
+        X, y, ids = self._to_xy(series_dict)
+        if max_samples > 0 and len(ids) > max_samples:
+            rng = np.random.default_rng(self.seed + 19)
+            selected = np.sort(rng.choice(len(ids), size=max_samples, replace=False))
+            X = X[selected]
+            y = y[selected]
+            ids = [ids[i] for i in selected]
+
+        tf = self.tf
+        inputs = tf.convert_to_tensor(X, dtype=tf.float32)
+        targets = tf.convert_to_tensor(y, dtype=tf.float32)
+
+        with tf.GradientTape() as tape:
+            tape.watch(inputs)
+            preds = self.model(inputs, training=False)
+            loss_per_window = tf.reduce_mean(tf.abs(preds - targets), axis=1)
+            mean_loss = tf.reduce_mean(loss_per_window)
+
+        grads = tape.gradient(mean_loss, inputs)
+        if grads is None:
+            raise RuntimeError("TSMixer saliency gradient is None.")
+
+        gradients = grads.numpy()[:, :, 0]
+        mean_abs_saliency = np.mean(np.abs(gradients), axis=0).astype(np.float32)
+        return mean_abs_saliency, ids
+
 
 def build_scores(
     split_data: SplitData,
@@ -676,6 +786,537 @@ def save_predictions_csv(
     csv_path = predictions_dir / f"predictions_{model_key}_foundation.csv"
     df_out.to_csv(csv_path, index=False)
     return csv_path
+
+
+def _sample_indices(total: int, max_samples: int, seed: int) -> np.ndarray:
+    if total <= 0:
+        return np.asarray([], dtype=np.int64)
+    if max_samples <= 0 or max_samples >= total:
+        return np.arange(total, dtype=np.int64)
+
+    rng = np.random.default_rng(seed)
+    return np.sort(rng.choice(total, size=max_samples, replace=False))
+
+
+def _build_segment_features(
+    split_data: SplitData,
+    window_ids: List[str],
+    context_length: int,
+    n_segments: int,
+) -> Tuple[np.ndarray, List[str], np.ndarray]:
+    if context_length <= 0:
+        raise ValueError("context_length must be > 0 for XAI features")
+
+    n_segments = max(1, min(n_segments, context_length))
+    segment_edges = np.linspace(0, context_length, n_segments + 1, dtype=np.int64)
+    feature_names = [f"s{seg_idx + 1:02d}_mean" for seg_idx in range(n_segments)]
+
+    X = np.zeros((len(window_ids), n_segments), dtype=np.float32)
+    for row_idx, window_id in enumerate(window_ids):
+        context = np.asarray(
+            split_data.series[window_id][:context_length],
+            dtype=np.float32,
+        )
+
+        for seg_idx in range(n_segments):
+            start = int(segment_edges[seg_idx])
+            end = int(segment_edges[seg_idx + 1])
+            if end <= start:
+                end = min(context_length, start + 1)
+            segment = context[start:end] if end > start else context[start : start + 1]
+            if segment.size == 0:
+                segment = context
+
+            X[row_idx, seg_idx] = float(np.mean(segment))
+
+    return X, feature_names, segment_edges
+
+
+def _plot_importance_bars(
+    feature_names: List[str],
+    values: np.ndarray,
+    title: str,
+    xlabel: str,
+    save_path: Path,
+    top_k: int,
+    signed: bool = False,
+) -> None:
+    if len(feature_names) == 0 or values.size == 0:
+        return
+
+    values = np.asarray(values, dtype=np.float32)
+    order = np.argsort(np.abs(values) if signed else values)[::-1]
+    order = order[: min(top_k, len(order))]
+
+    selected_features = [feature_names[i] for i in order]
+    selected_values = values[order]
+
+    if signed:
+        bar_colors = ["#e74c3c" if v >= 0 else "#2ecc71" for v in selected_values]
+    else:
+        bar_colors = ["#34495e"] * len(selected_values)
+
+    y_pos = np.arange(len(selected_features))
+    plt.figure(figsize=(9, 6))
+    plt.barh(y_pos, selected_values, color=bar_colors)
+    plt.yticks(y_pos, selected_features)
+    plt.gca().invert_yaxis()
+    if signed:
+        plt.axvline(0.0, color="black", linewidth=0.9)
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  XAI plot saved: {save_path}")
+
+
+def _segment_means_to_context(
+    segment_means: np.ndarray,
+    segment_edges: np.ndarray,
+    context_length: int,
+) -> np.ndarray:
+    context = np.zeros(context_length, dtype=np.float32)
+    n_segments = min(len(segment_means), len(segment_edges) - 1)
+    for seg_idx in range(n_segments):
+        start = int(segment_edges[seg_idx])
+        end = int(segment_edges[seg_idx + 1])
+        if end <= start:
+            end = min(context_length, start + 1)
+        context[start:end] = float(segment_means[seg_idx])
+    return context
+
+
+def _extract_future_targets(
+    split_data: SplitData,
+    window_ids: List[str],
+    context_length: int,
+    prediction_length: int,
+) -> np.ndarray:
+    futures = np.zeros((len(window_ids), prediction_length), dtype=np.float32)
+    for row_idx, window_id in enumerate(window_ids):
+        values = np.asarray(split_data.series[window_id], dtype=np.float32)
+        target = values[context_length : context_length + prediction_length]
+        if len(target) != prediction_length:
+            raise RuntimeError(
+                f"Window {window_id} has invalid future length for XAI "
+                f"(expected {prediction_length}, got {len(target)})."
+            )
+        futures[row_idx] = target
+    return futures
+
+
+def _predict_scores_with_foundation_model(
+    X_segment: np.ndarray,
+    future_target: np.ndarray,
+    forecaster,
+    segment_edges: np.ndarray,
+    context_length: int,
+    prediction_length: int,
+) -> np.ndarray:
+    X_arr = np.asarray(X_segment, dtype=np.float32)
+    if X_arr.ndim == 1:
+        X_arr = X_arr.reshape(1, -1)
+
+    n_rows = X_arr.shape[0]
+    baseline = float(np.mean(np.abs(future_target - np.mean(future_target))))
+    scores = np.full(n_rows, baseline, dtype=np.float32)
+
+    series_dict: Dict[str, np.ndarray] = {}
+    for row_idx in range(n_rows):
+        context = _segment_means_to_context(
+            X_arr[row_idx],
+            segment_edges=segment_edges,
+            context_length=context_length,
+        )
+        series_dict[str(row_idx)] = np.concatenate(
+            [context, future_target.astype(np.float32)],
+            axis=0,
+        ).astype(np.float32)
+
+    preds_by_id = forecaster.forecast(series_dict)
+    for row_idx in range(n_rows):
+        pred = preds_by_id.get(str(row_idx))
+        if pred is None:
+            continue
+        y_pred = np.asarray(pred, dtype=np.float32)[:prediction_length]
+        if len(y_pred) != prediction_length:
+            continue
+        scores[row_idx] = float(np.mean(np.abs(future_target - y_pred)))
+
+    return scores
+
+
+def _choose_lime_indices(scores: np.ndarray, n_instances: int, seed: int) -> np.ndarray:
+    total = len(scores)
+    if total <= 0:
+        return np.asarray([], dtype=np.int64)
+    if n_instances <= 0 or n_instances >= total:
+        return np.arange(total, dtype=np.int64)
+
+    selected: List[int] = []
+    sorted_idx = np.argsort(scores)
+    anchors = [
+        int(sorted_idx[0]),
+        int(sorted_idx[-1]),
+        int(sorted_idx[len(sorted_idx) // 2]),
+    ]
+    for idx in anchors:
+        if idx not in selected:
+            selected.append(idx)
+    if len(selected) >= n_instances:
+        return np.asarray(sorted(selected[:n_instances]), dtype=np.int64)
+
+    rng = np.random.default_rng(seed + 103)
+    remaining = [i for i in range(total) if i not in selected]
+    needed = max(0, n_instances - len(selected))
+    if needed > 0 and remaining:
+        sampled = rng.choice(remaining, size=min(needed, len(remaining)), replace=False)
+        selected.extend(int(i) for i in sampled)
+
+    return np.asarray(sorted(selected), dtype=np.int64)
+
+
+def _run_shap_direct(
+    X: np.ndarray,
+    y_targets: np.ndarray,
+    scores: np.ndarray,
+    forecaster,
+    segment_edges: np.ndarray,
+    context_length: int,
+    prediction_length: int,
+    feature_names: List[str],
+    model_key: str,
+    model_name: str,
+    xai_dir: Path,
+    top_features: int,
+    shap_instances: int,
+    shap_background: int,
+    shap_nsamples: int,
+    seed: int,
+) -> bool:
+    try:
+        import shap
+    except ImportError:
+        print("  [INFO] SHAP not installed, skipping SHAP.")
+        return False
+
+    if len(X) < 3:
+        print("  [INFO] Not enough windows for SHAP.")
+        return False
+
+    explain_idx = _choose_lime_indices(scores, shap_instances, seed=seed + 7)
+    if len(explain_idx) == 0:
+        print("  [INFO] SHAP had no windows to explain.")
+        return False
+
+    collected_rows: List[np.ndarray] = []
+    explained_features: List[np.ndarray] = []
+
+    for idx in explain_idx:
+        pool = np.array([i for i in range(len(X)) if i != idx], dtype=np.int64)
+        if len(pool) == 0:
+            pool = np.array([idx], dtype=np.int64)
+
+        bg_local_idx = _sample_indices(
+            total=len(pool),
+            max_samples=max(2, shap_background),
+            seed=seed + int(idx) * 17,
+        )
+        background = X[pool[bg_local_idx]]
+        future_target = y_targets[idx]
+
+        def score_fn(data: np.ndarray) -> np.ndarray:
+            return _predict_scores_with_foundation_model(
+                X_segment=data,
+                future_target=future_target,
+                forecaster=forecaster,
+                segment_edges=segment_edges,
+                context_length=context_length,
+                prediction_length=prediction_length,
+            )
+
+        try:
+            explainer = shap.KernelExplainer(score_fn, background)
+            shap_values = explainer.shap_values(
+                X[idx : idx + 1],
+                nsamples=max(16, shap_nsamples),
+            )
+            row_values = np.asarray(shap_values, dtype=np.float32).reshape(-1)
+            if row_values.shape[0] != X.shape[1]:
+                raise ValueError(
+                    f"Unexpected SHAP row shape {row_values.shape}, expected {X.shape[1]}."
+                )
+            collected_rows.append(row_values)
+            explained_features.append(X[idx])
+        except Exception as exc:
+            print(f"  [INFO] SHAP failed for window index {idx}: {exc}")
+
+    if not collected_rows:
+        print("  [INFO] SHAP produced no usable explanations.")
+        return False
+
+    shap_matrix = np.vstack(collected_rows)
+    X_explained = np.vstack(explained_features)
+    mean_abs = np.mean(np.abs(shap_matrix), axis=0)
+
+    top_k = min(top_features, len(feature_names), shap_matrix.shape[1])
+    top_idx = np.argsort(mean_abs)[::-1][:top_k]
+    top_names = [feature_names[i] for i in top_idx]
+
+    plt.figure(figsize=(10, 8))
+    shap.summary_plot(
+        shap_matrix[:, top_idx],
+        features=X_explained[:, top_idx],
+        feature_names=top_names,
+        plot_type="dot",
+        max_display=top_k,
+        show=False,
+        plot_size=None,
+    )
+    plt.title(f"SHAP Beeswarm - {model_name} (direct foundation model)")
+    plt.tight_layout()
+    beeswarm_path = xai_dir / f"{model_key}_direct_shap_beeswarm.png"
+    plt.savefig(beeswarm_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  XAI plot saved: {beeswarm_path}")
+
+    _plot_importance_bars(
+        feature_names=feature_names,
+        values=mean_abs,
+        title=f"SHAP Importance - {model_name} (direct foundation model)",
+        xlabel="Mean |SHAP value|",
+        save_path=xai_dir / f"{model_key}_direct_shap_importance.png",
+        top_k=top_features,
+        signed=False,
+    )
+    return True
+
+
+def _run_lime_direct(
+    X: np.ndarray,
+    y_targets: np.ndarray,
+    scores: np.ndarray,
+    forecaster,
+    segment_edges: np.ndarray,
+    context_length: int,
+    prediction_length: int,
+    feature_names: List[str],
+    model_key: str,
+    model_name: str,
+    xai_dir: Path,
+    top_features: int,
+    lime_instances: int,
+    lime_perturbations: int,
+    seed: int,
+) -> bool:
+    try:
+        import lime.lime_tabular
+    except ImportError:
+        print("  [INFO] LIME not installed, skipping LIME.")
+        return False
+
+    if len(X) < 2:
+        print("  [INFO] Not enough windows for LIME.")
+        return False
+
+    explainer = lime.lime_tabular.LimeTabularExplainer(
+        training_data=X,
+        training_labels=scores,
+        feature_names=feature_names,
+        mode="regression",
+        discretize_continuous=True,
+        random_state=seed,
+    )
+
+    explain_idx = _choose_lime_indices(scores, lime_instances, seed=seed)
+    collected: List[pd.Series] = []
+
+    for idx in explain_idx:
+        future_target = y_targets[idx]
+
+        def score_fn(data: np.ndarray) -> np.ndarray:
+            return _predict_scores_with_foundation_model(
+                X_segment=data,
+                future_target=future_target,
+                forecaster=forecaster,
+                segment_edges=segment_edges,
+                context_length=context_length,
+                prediction_length=prediction_length,
+            )
+
+        exp = explainer.explain_instance(
+            X[idx],
+            score_fn,
+            num_features=min(top_features, len(feature_names)),
+            num_samples=max(200, lime_perturbations),
+        )
+
+        local_weights: Dict[str, float] = {}
+        for feature_desc, weight in exp.as_list():
+            mapped_name = None
+            for fname in feature_names:
+                if fname in feature_desc:
+                    mapped_name = fname
+                    break
+            if mapped_name is None:
+                mapped_name = feature_desc
+            local_weights[mapped_name] = float(weight)
+
+        row = pd.Series(local_weights).reindex(feature_names, fill_value=0.0)
+        collected.append(row)
+
+    if not collected:
+        print("  [INFO] LIME produced no explanations.")
+        return False
+
+    avg_weights = pd.concat(collected, axis=1).mean(axis=1)
+    _plot_importance_bars(
+        feature_names=feature_names,
+        values=avg_weights.to_numpy(dtype=np.float32),
+        title=f"LIME Importance - {model_name} (direct foundation model)",
+        xlabel="Mean local contribution (negative to positive)",
+        save_path=xai_dir / f"{model_key}_direct_lime.png",
+        top_k=top_features,
+        signed=True,
+    )
+    return True
+
+
+def _run_tsmixer_embedded_xai(
+    model_key: str,
+    model_name: str,
+    forecaster: TSMixerForecaster,
+    split_data: SplitData,
+    window_ids: List[str],
+    context_length: int,
+    xai_dir: Path,
+    max_samples: int,
+) -> None:
+    subset_series = {window_id: split_data.series[window_id] for window_id in window_ids}
+    saliency, _ = forecaster.explain_saliency(subset_series, max_samples=max_samples)
+
+    x_axis = np.arange(1, min(context_length, len(saliency)) + 1)
+    y_values = saliency[: len(x_axis)]
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(x_axis, y_values, color="#c0392b", linewidth=1.7)
+    plt.fill_between(x_axis, y_values, alpha=0.25, color="#e74c3c")
+    plt.title(f"Embedded Saliency - {model_name}")
+    plt.xlabel("Context timestep")
+    plt.ylabel("Mean absolute gradient")
+    plt.tight_layout()
+    plot_path = xai_dir / f"{model_key}_embedded_saliency.png"
+    plt.savefig(plot_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  XAI plot saved: {plot_path}")
+
+
+def generate_foundation_xai(
+    args: argparse.Namespace,
+    model_key: str,
+    model_name: str,
+    split_data: SplitData,
+    window_ids: List[str],
+    scores: np.ndarray,
+    forecaster,
+) -> None:
+    if not args.xai_enabled:
+        return
+
+    if len(window_ids) < 10:
+        print(f"  [INFO] {model_name}: not enough windows for reliable XAI (need >= 10).")
+        return
+
+    xai_dir = Path(args.xai_dir)
+    xai_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"  Running XAI for {model_name}...")
+    X_full, feature_names, segment_edges = _build_segment_features(
+        split_data=split_data,
+        window_ids=window_ids,
+        context_length=args.context_length,
+        n_segments=args.xai_segments,
+    )
+    y_full = np.asarray(scores, dtype=np.float32)
+    y_targets_full = _extract_future_targets(
+        split_data=split_data,
+        window_ids=window_ids,
+        context_length=args.context_length,
+        prediction_length=args.prediction_length,
+    )
+
+    sample_idx = _sample_indices(
+        total=len(window_ids),
+        max_samples=args.xai_max_samples,
+        seed=args.seed + len(model_key) * 31,
+    )
+    X = X_full[sample_idx]
+    y = y_full[sample_idx]
+    y_targets = y_targets_full[sample_idx]
+
+    if len(y) < 5:
+        print(f"  [INFO] {model_name}: not enough sampled windows for XAI.")
+        return
+
+    method_set = set(args.xai_methods)
+    if "shap" in method_set:
+        _run_shap_direct(
+            X=X,
+            y_targets=y_targets,
+            scores=y,
+            forecaster=forecaster,
+            segment_edges=segment_edges,
+            context_length=args.context_length,
+            prediction_length=args.prediction_length,
+            feature_names=feature_names,
+            model_key=model_key,
+            model_name=model_name,
+            xai_dir=xai_dir,
+            top_features=args.xai_top_features,
+            shap_instances=args.xai_lime_instances,
+            shap_background=args.xai_shap_background,
+            shap_nsamples=args.xai_shap_nsamples,
+            seed=args.seed + 11,
+        )
+
+    if "lime" in method_set:
+        _run_lime_direct(
+            X=X,
+            y_targets=y_targets,
+            scores=y,
+            forecaster=forecaster,
+            segment_edges=segment_edges,
+            context_length=args.context_length,
+            prediction_length=args.prediction_length,
+            feature_names=feature_names,
+            model_key=model_key,
+            model_name=model_name,
+            xai_dir=xai_dir,
+            top_features=args.xai_top_features,
+            lime_instances=args.xai_lime_instances,
+            lime_perturbations=args.xai_lime_perturbations,
+            seed=args.seed + 13,
+        )
+
+    if (
+        "embedded" in method_set
+        and model_key == "tsmixer"
+        and isinstance(forecaster, TSMixerForecaster)
+    ):
+        _run_tsmixer_embedded_xai(
+            model_key=model_key,
+            model_name=model_name,
+            forecaster=forecaster,
+            split_data=split_data,
+            window_ids=window_ids,
+            context_length=args.context_length,
+            xai_dir=xai_dir,
+            max_samples=args.xai_max_samples,
+        )
+    elif "embedded" in method_set:
+        print(f"  [INFO] {model_name}: embedded explainability is only available for TSMixer.")
 
 
 def plot_foundation_confusion_matrices(
@@ -912,6 +1553,15 @@ def main() -> None:
             y_pred=y_pred,
             threshold=threshold,
             predictions_dir=predictions_dir,
+        )
+        generate_foundation_xai(
+            args=args,
+            model_key=model_key,
+            model_name=model_name,
+            split_data=test_data,
+            window_ids=test_ids,
+            scores=test_scores,
+            forecaster=forecaster,
         )
 
         print_metrics(model_name, metrics)
