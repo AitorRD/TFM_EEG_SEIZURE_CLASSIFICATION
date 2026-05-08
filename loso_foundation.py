@@ -2,10 +2,9 @@
 LOSO (Leave-One-Subject-Out) with foundation models for EEG seizure classification.
 
 For each fold one complete patient is left out as the test set; all remaining
-patients are used for threshold tuning (and TSMixer training).
+patients are used for threshold tuning.
 
   - Zero-shot models (Chronos2, Moirai2): loaded ONCE, reused across every fold.
-  - Trainable model (TSMixer): re-created and re-fitted from scratch each fold.
 
 Outputs (under --output-dir, default images/results/loso/):
   loso_fold_metrics.csv          — per-fold, per-model metrics
@@ -17,13 +16,11 @@ Usage:
     python loso_foundation.py
     python loso_foundation.py --model chronos2 --channel "EEG F3"
     python loso_foundation.py --models chronos2 moirai2 --max-windows 128
-    python loso_foundation.py --model tsmixer --tsmixer-epochs 10
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -37,7 +34,6 @@ from sklearn.metrics import auc, confusion_matrix, roc_curve
 from foundation_models import (
     MODEL_DISPLAY_NAMES,
     SplitData,
-    TSMixerForecaster,
     build_scores,
     create_forecaster,
     evaluate_classification,
@@ -56,10 +52,10 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    p.add_argument("--model", choices=["chronos2", "moirai2", "tsmixer"], default=None)
+    p.add_argument("--model", choices=["chronos2", "moirai2"], default=None)
     p.add_argument(
         "--models", nargs="+",
-        choices=["chronos2", "moirai2", "tsmixer"], default=None,
+        choices=["chronos2", "moirai2"], default=None,
     )
 
     p.add_argument("--channel", type=str, default="EEG F3")
@@ -90,15 +86,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--chronos-model-id", type=str, default="amazon/chronos-2")
     p.add_argument("--moirai2-model-id", type=str, default="Salesforce/moirai-2.0-R-small")
     p.add_argument("--batch-size", type=int, default=32)
-
-    # TSMixer
-    p.add_argument("--tsmixer-epochs", type=int, default=20)
-    p.add_argument("--tsmixer-learning-rate", type=float, default=1e-3)
-    p.add_argument("--tsmixer-dropout", type=float, default=0.1)
-    p.add_argument("--tsmixer-hidden-dim", type=int, default=128)
-    p.add_argument("--tsmixer-blocks", type=int, default=3)
-    p.add_argument("--tsmixer-val-ratio", type=float, default=0.1)
-    p.add_argument("--tsmixer-device", type=str, default="cpu", choices=["cpu", "gpu"])
 
     return p.parse_args()
 
@@ -271,35 +258,7 @@ def run_fold(
         print(f"    [SKIP] {patient_id}: no valid val windows for threshold tuning")
         return None
 
-    # TSMixer must be re-created and re-fitted for each fold
-    if model_key == "tsmixer":
-        forecaster = TSMixerForecaster(
-            context_length=args.context_length,
-            prediction_length=args.prediction_length,
-            batch_size=args.batch_size,
-            epochs=args.tsmixer_epochs,
-            learning_rate=args.tsmixer_learning_rate,
-            dropout=args.tsmixer_dropout,
-            hidden_dim=args.tsmixer_hidden_dim,
-            num_blocks=args.tsmixer_blocks,
-            val_ratio=args.tsmixer_val_ratio,
-            seed=args.seed,
-            device=args.tsmixer_device,
-        )
-        train_data = df_to_split_data(
-            "train", val_df, args.channel,
-            args.context_length, args.prediction_length,
-            max_windows=args.max_windows,
-            window_order=args.window_order,
-            seed=args.seed - 1,
-        )
-        if train_data is None:
-            print(f"    [SKIP] {patient_id}: no valid train windows for TSMixer")
-            return None
-        print(f"    Fitting TSMixer on {len(train_data.window_ids)} windows...")
-        forecaster.fit(train_data.series)
-    else:
-        forecaster = base_forecaster  # zero-shot: reuse the already-loaded model
+    forecaster = base_forecaster
 
     # Threshold tuning on val (remaining patients)
     val_preds = forecaster.forecast(val_data.series)
@@ -530,12 +489,8 @@ def main() -> None:
         print(f"  {model_name.upper()} — LOSO  ({len(patients)} folds)")
         print("=" * 60)
 
-        # Zero-shot models are loaded once and reused across folds
-        if model_key != "tsmixer":
-            print(f"  Loading {model_name} (zero-shot — loaded once for all folds)...")
-            base_forecaster = create_forecaster(model_key, args)
-        else:
-            base_forecaster = None
+        print(f"  Loading {model_name} (zero-shot — loaded once for all folds)...")
+        base_forecaster = create_forecaster(model_key, args)
 
         fold_results: List[Dict] = []
 

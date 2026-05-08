@@ -1,19 +1,20 @@
 """
-LOSO (Leave-One-Subject-Out) with tsfresh features + TabPFN / TabICL.
+LOSO (Leave-One-Subject-Out) with tsfresh features + tabular classifiers.
 
 Pipeline per fold:
   1. Extract tsfresh features per patient (cached to disk after first run).
   2. Combine remaining patients → train split.
   3. Fit SelectKBest(f_classif, k) on train only, transform train and test.
-  4. Train TabPFN / TabICL on train features.
-  5. Evaluate on the left-out patient (test).
+  4. Scale with StandardScaler (fit on train).
+  5. Train classifier on train features.
+  6. Evaluate on the left-out patient (test).
 
 Output CSV uses the same format as loso_foundation.py so plot_loso_results.py
 works with the combined results of both scripts.
 
 Usage:
-    python loso_tabular.py                       # TabPFN + TabICL (default)
-    python loso_tabular.py --models tabpfn       # TabPFN only
+    python loso_tabular.py                       # all models (default)
+    python loso_tabular.py --models tabpfn xgb   # subset
     python loso_tabular.py --k 30                # SelectKBest with k=30
     python loso_tabular.py --no-cache            # Force feature re-extraction
     python loso_tabular.py --append-csv images/results/loso/loso_fold_metrics.csv
@@ -33,7 +34,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import (
     accuracy_score,
@@ -42,7 +45,10 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+import xgboost as xgb
 from tsfresh import extract_features
 from tsfresh.utilities.dataframe_functions import impute as tsfresh_impute
 
@@ -77,6 +83,11 @@ TSFRESH_FC_PARAMS = {
 MODEL_DISPLAY_NAMES = {
     "tabpfn": "TabPFN",
     "tabicl": "TabICL",
+    "xgb":    "XGBoost",
+    "rf":     "RandomForest",
+    "lr":     "LogisticRegression",
+    "svc":    "SVC",
+    "knn":    "KNN",
 }
 
 # Metrics reported — same keys as loso_foundation.py
@@ -98,9 +109,10 @@ def parse_args() -> argparse.Namespace:
         description="LOSO tsfresh + TabPFN/TabICL seizure classification",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    _all_models = ["tabpfn", "tabicl", "xgb", "rf", "lr", "svc", "knn"]
     p.add_argument(
         "--models", nargs="+",
-        choices=["tabpfn", "tabicl"], default=["tabpfn", "tabicl"],
+        choices=_all_models, default=_all_models,
     )
     p.add_argument(
         "--raw-dir", type=str, default="data/raw/csv-data",
@@ -287,6 +299,21 @@ def create_model(model_key: str, args: argparse.Namespace):
         if not TABICL_AVAILABLE:
             raise ImportError("tabicl not installed. Run: pip install tabicl")
         return TabICLClassifier(device=args.tabicl_device, random_state=args.random_state)
+
+    if model_key == "xgb":
+        return xgb.XGBClassifier(random_state=args.random_state, eval_metric="logloss")
+
+    if model_key == "rf":
+        return RandomForestClassifier(n_estimators=100, random_state=args.random_state, n_jobs=-1)
+
+    if model_key == "lr":
+        return LogisticRegression(max_iter=1000, random_state=args.random_state)
+
+    if model_key == "svc":
+        return SVC(probability=True, random_state=args.random_state)
+
+    if model_key == "knn":
+        return KNeighborsClassifier(n_neighbors=5, n_jobs=-1)
 
     raise ValueError(f"Unsupported model: {model_key}")
 
