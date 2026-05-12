@@ -7,7 +7,7 @@ venv/
 /images/raw_eeg_traces/*
 
 pipeline.md
-
+/images/results/loso/optuna
 /data/processed/dataset_clipped.csv
 /data/processed/loso_features/*
 /data/processed/dataset_clipped.zip

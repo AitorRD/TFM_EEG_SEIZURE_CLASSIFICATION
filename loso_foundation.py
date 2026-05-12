@@ -1,4 +1,6 @@
 """
+OBSOLETO — sustituido por loso_foundation.ipynb.
+
 LOSO (Leave-One-Subject-Out) with foundation models for EEG seizure classification.
 
 For each fold one complete patient is left out as the test set; all remaining

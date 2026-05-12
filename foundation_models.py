@@ -1,4 +1,6 @@
 """
+OBSOLETO — sustituido por loso_foundation.ipynb.
+
 Chronos2 / Moirai2 classification over windowed EEG CSV files.
 
 Workflow:

@@ -29,6 +29,8 @@ METRICS_OF_INTEREST = ["Accuracy", "Precision", "Recall", "F1 Score", "F1 Macro"
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Plot LOSO results")
     p.add_argument("--output-dir", type=str, default="images/results/loso")
+    p.add_argument("--csv", type=str, default=None,
+                   help="Path to loso_fold_metrics.csv (overrides --output-dir for the CSV)")
     return p.parse_args()
 
 
@@ -36,16 +38,25 @@ def parse_args() -> argparse.Namespace:
 # Metrics table
 # ---------------------------------------------------------------------------
 
+_ROC_EXCLUDE = {"chronos", "moirai", "tsmixer"}
+
+
 def plot_metrics_table(df: pd.DataFrame, output_dir: Path) -> None:
     available = [m for m in METRICS_OF_INTEREST if m in df.columns]
     agg = df.groupby("model")[available].agg(["mean", "std"])
     models = agg.index.tolist()
 
     table_data = [
-        [f"{agg.loc[m, (metric, 'mean')]:.4f} ± {agg.loc[m, (metric, 'std')]:.4f}"
+        [f"{agg.loc[m, (metric, 'mean')]:.2f} ± {agg.loc[m, (metric, 'std')]:.2f}"
          for metric in available]
         for m in models
     ]
+
+    # Index of best model per metric (highest mean)
+    best_row = {
+        metric: int(np.argmax([agg.loc[m, (metric, "mean")] for m in models]))
+        for metric in available
+    }
 
     fig, ax = plt.subplots(figsize=(max(10, len(available) * 1.8), len(models) * 0.75 + 1.4))
     ax.axis("off")
@@ -60,9 +71,15 @@ def plot_metrics_table(df: pd.DataFrame, output_dir: Path) -> None:
     table.set_fontsize(9)
     table.scale(1.2, 1.5)
 
-    for j in range(len(available)):
+    for j, metric in enumerate(available):
         table[(0, j)].set_facecolor("#2c3e50")
         table[(0, j)].set_text_props(color="white", fontweight="bold")
+        # Bold + highlight best cell in each column
+        best_i = best_row[metric]
+        cell = table[(best_i + 1, j)]
+        cell.set_facecolor("#d5f5e3")
+        cell.set_text_props(fontweight="bold")
+
     for i in range(len(models)):
         table[(i + 1, -1)].set_facecolor("#ecf0f1")
         table[(i + 1, -1)].set_text_props(fontweight="bold")
@@ -99,6 +116,9 @@ def plot_roc_curves(output_dir: Path) -> None:
 
     for idx, pred_file in enumerate(pred_files):
         model_key = pred_file.name.replace("_loso_predictions.csv", "")
+        if model_key.lower() in _ROC_EXCLUDE:
+            print(f"  [SKIP ROC] {model_key} excluded")
+            continue
         df = pd.read_csv(pred_file)
 
         y_true  = df["y_true"].values
@@ -137,7 +157,7 @@ def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
 
-    csv_path = output_dir / "loso_fold_metrics.csv"
+    csv_path = Path(args.csv) if args.csv else output_dir / "loso_fold_metrics.csv"
     if not csv_path.exists():
         print(f"[ERROR] Not found: {csv_path}")
         return

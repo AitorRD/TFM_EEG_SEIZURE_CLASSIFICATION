@@ -2,21 +2,23 @@
 LOSO (Leave-One-Subject-Out) with tsfresh features + tabular classifiers.
 
 Pipeline per fold:
-  1. Extract tsfresh features per patient (cached to disk after first run).
-  2. Combine remaining patients → train split.
-  3. Fit SelectKBest(f_classif, k) on train only, transform train and test.
-  4. Scale with StandardScaler (fit on train).
-  5. Train classifier on train features.
-  6. Evaluate on the left-out patient (test).
+  1. Extract tsfresh features per patient.
+  2. (Optional) Optuna tunes hyperparameters once on all-patient data with k-fold CV.
+  3. Combine remaining patients → train split.
+  4. Fit SelectKBest(f_classif, k) on train only, transform train and test.
+  5. Scale with StandardScaler (fit on train).
+  6. Train classifier (with Optuna best params if available) on train features.
+  7. Evaluate on the left-out patient (test).
 
 Output CSV uses the same format as loso_foundation.py so plot_loso_results.py
 works with the combined results of both scripts.
 
 Usage:
-    python loso_tabular.py                       # all models (default)
-    python loso_tabular.py --models tabpfn xgb   # subset
-    python loso_tabular.py --k 30                # SelectKBest with k=30
-    python loso_tabular.py --no-cache            # Force feature re-extraction
+    python loso_tabular.py                            # all models, no Optuna
+    python loso_tabular.py --optuna-trials 50         # Optuna pre-loop (50 trials)
+    python loso_tabular.py --models tabpfn xgb        # subset
+    python loso_tabular.py --k 30                     # SelectKBest with k=30
+    python loso_tabular.py --no-cache                 # Force feature re-extraction
     python loso_tabular.py --append-csv images/results/loso/loso_fold_metrics.csv
 """
 
@@ -64,6 +66,13 @@ try:
 except ImportError:
     TABICL_AVAILABLE = False
 
+try:
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    OPTUNA_AVAILABLE = True
+except ImportError:
+    OPTUNA_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -89,6 +98,9 @@ MODEL_DISPLAY_NAMES = {
     "svc":    "SVC",
     "knn":    "KNN",
 }
+
+# Pretrained models: no hyperparameters to tune with Optuna
+_NO_OPTUNA_MODELS = {"tabpfn", "tabicl"}
 
 # Metrics reported — same keys as loso_foundation.py
 METRIC_KEYS = ["Accuracy", "Precision", "Recall", "F1 Score", "F1 Macro", "F1 Micro", "ROC AUC"]
@@ -153,6 +165,30 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--tabicl-device", type=str, default="cuda:0",
+    )
+    p.add_argument(
+        "--optuna-trials", type=int, default=0,
+        help="Optuna trials before LOSO loop (0 = disabled). TabPFN/TabICL are always skipped.",
+    )
+    p.add_argument(
+        "--optuna-cv-folds", type=int, default=3,
+        help="Stratified k-fold splits used inside Optuna objective",
+    )
+    p.add_argument(
+        "--optuna-timeout", type=float, default=None,
+        help="Seconds budget for Optuna per model (None = unlimited)",
+    )
+    p.add_argument(
+        "--optuna-startup-trials", type=int, default=15,
+        help="MedianPruner: trials before pruning starts",
+    )
+    p.add_argument(
+        "--optuna-warmup-steps", type=int, default=8,
+        help="MedianPruner: CV folds reported before pruning within a trial",
+    )
+    p.add_argument(
+        "--optuna-save-viz", action="store_true", default=False,
+        help="Save Optuna HTML plots (requires plotly) to output_dir/optuna/",
     )
     return p.parse_args()
 
@@ -289,33 +325,175 @@ def load_or_extract_patient_features(
 # Model creation
 # ---------------------------------------------------------------------------
 
-def create_model(model_key: str, args: argparse.Namespace):
+def _suggest_params(trial, model_key: str) -> dict:
+    if model_key == "xgb":
+        return {
+            "n_estimators":     trial.suggest_int("n_estimators", 50, 500),
+            "max_depth":        trial.suggest_int("max_depth", 3, 10),
+            "learning_rate":    trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "subsample":        trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+        }
+    if model_key == "rf":
+        return {
+            "n_estimators":      trial.suggest_int("n_estimators", 50, 500),
+            "max_depth":         trial.suggest_int("max_depth", 3, 30),
+            "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
+            "min_samples_leaf":  trial.suggest_int("min_samples_leaf", 1, 10),
+        }
+    if model_key == "lr":
+        return {"C": trial.suggest_float("C", 1e-3, 100.0, log=True)}
+    if model_key == "svc":
+        return {
+            "C":      trial.suggest_float("C", 1e-3, 100.0, log=True),
+            "kernel": trial.suggest_categorical("kernel", ["rbf", "linear"]),
+        }
+    if model_key == "knn":
+        return {
+            "n_neighbors": trial.suggest_int("n_neighbors", 3, 30),
+            "weights":     trial.suggest_categorical("weights", ["uniform", "distance"]),
+        }
+    return {}
+
+
+def _build_model(model_key: str, params: dict, random_state: int,
+                 tabpfn_device: str = "auto", tabicl_device: str = "cuda:0"):
     if model_key == "tabpfn":
         if not TABPFN_AVAILABLE:
             raise ImportError("tabpfn not installed. Run: pip install tabpfn")
-        return TabPFNClassifier(device=args.tabpfn_device, ignore_pretraining_limits=True)
-
+        return TabPFNClassifier(device=tabpfn_device, ignore_pretraining_limits=True)
     if model_key == "tabicl":
         if not TABICL_AVAILABLE:
             raise ImportError("tabicl not installed. Run: pip install tabicl")
-        return TabICLClassifier(device=args.tabicl_device, random_state=args.random_state)
-
+        return TabICLClassifier(device=tabicl_device, random_state=random_state)
     if model_key == "xgb":
-        return xgb.XGBClassifier(random_state=args.random_state, eval_metric="logloss")
-
+        return xgb.XGBClassifier(
+            random_state=random_state, eval_metric="logloss",
+            n_estimators=params.get("n_estimators", 100),
+            max_depth=params.get("max_depth", 6),
+            learning_rate=params.get("learning_rate", 0.1),
+            subsample=params.get("subsample", 1.0),
+            colsample_bytree=params.get("colsample_bytree", 1.0),
+            min_child_weight=params.get("min_child_weight", 1),
+        )
     if model_key == "rf":
-        return RandomForestClassifier(n_estimators=100, random_state=args.random_state, n_jobs=-1)
-
+        return RandomForestClassifier(
+            random_state=random_state, n_jobs=-1,
+            n_estimators=params.get("n_estimators", 100),
+            max_depth=params.get("max_depth", None),
+            min_samples_split=params.get("min_samples_split", 2),
+            min_samples_leaf=params.get("min_samples_leaf", 1),
+        )
     if model_key == "lr":
-        return LogisticRegression(max_iter=1000, random_state=args.random_state)
-
+        return LogisticRegression(
+            max_iter=1000, random_state=random_state,
+            C=params.get("C", 1.0),
+        )
     if model_key == "svc":
-        return SVC(probability=True, random_state=args.random_state)
-
+        return SVC(
+            probability=True, random_state=random_state,
+            C=params.get("C", 1.0),
+            kernel=params.get("kernel", "rbf"),
+        )
     if model_key == "knn":
-        return KNeighborsClassifier(n_neighbors=5, n_jobs=-1)
-
+        return KNeighborsClassifier(
+            n_jobs=-1,
+            n_neighbors=params.get("n_neighbors", 5),
+            weights=params.get("weights", "uniform"),
+        )
     raise ValueError(f"Unsupported model: {model_key}")
+
+
+def create_model(model_key: str, args: argparse.Namespace, best_params: Optional[dict] = None):
+    return _build_model(
+        model_key, best_params or {}, args.random_state,
+        tabpfn_device=args.tabpfn_device,
+        tabicl_device=args.tabicl_device,
+    )
+
+
+def tune_hyperparams_optuna(
+    model_key: str,
+    X_all: np.ndarray,
+    y_all: np.ndarray,
+    n_trials: int,
+    cv_folds: int,
+    k: int,
+    random_state: int,
+    timeout: Optional[float] = None,
+    n_startup_trials: int = 15,
+    n_warmup_steps: int = 8,
+    show_progress_bar: bool = True,
+    save_visualizations: bool = False,
+    output_dir: Optional[Path] = None,
+) -> dict:
+    from sklearn.model_selection import StratifiedKFold
+    from sklearn.pipeline import Pipeline
+
+    k_eff = min(k, X_all.shape[1])
+
+    def objective(trial):
+        params = _suggest_params(trial, model_key)
+        cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+        scores = []
+        for step, (tr_idx, val_idx) in enumerate(cv.split(X_all, y_all)):
+            pipe = Pipeline([
+                ("sel", SelectKBest(f_classif, k=k_eff)),
+                ("scl", StandardScaler()),
+                ("clf", _build_model(model_key, params, random_state)),
+            ])
+            try:
+                pipe.fit(X_all[tr_idx], y_all[tr_idx])
+                y_pred = pipe.predict(X_all[val_idx])
+                score = float(f1_score(y_all[val_idx], y_pred, average="macro", zero_division=0))
+            except Exception:
+                score = 0.0
+            scores.append(score)
+            trial.report(float(np.mean(scores)), step)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+        return float(np.mean(scores))
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=random_state),
+        pruner=optuna.pruners.MedianPruner(
+            n_startup_trials=n_startup_trials,
+            n_warmup_steps=min(n_warmup_steps, cv_folds - 1),
+        ),
+    )
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        timeout=timeout,
+        show_progress_bar=show_progress_bar,
+    )
+
+    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    print(
+        f"    Best F1-macro={study.best_value:.4f} "
+        f"({len(completed)}/{n_trials} completed, {n_trials - len(completed)} pruned)"
+    )
+    print(f"    Best params: {study.best_params}")
+
+    if save_visualizations and output_dir is not None:
+        try:
+            import optuna.visualization as ov
+            viz_dir = output_dir / "optuna" / model_key
+            viz_dir.mkdir(parents=True, exist_ok=True)
+            ov.plot_optimization_history(study).write_html(
+                str(viz_dir / "optimization_history.html")
+            )
+            if len(completed) > 1:
+                ov.plot_param_importances(study).write_html(
+                    str(viz_dir / "param_importances.html")
+                )
+            print(f"    Optuna plots saved: {viz_dir}")
+        except Exception as e:
+            print(f"    [WARN] Could not save Optuna visualizations: {e}")
+
+    return study.best_params
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +535,7 @@ def run_fold(
     y_test: pd.Series,
     model_key: str,
     args: argparse.Namespace,
+    best_params: Optional[dict] = None,
 ) -> Optional[Dict]:
     """Train and evaluate one LOSO fold for one tabular model."""
 
@@ -385,7 +564,7 @@ def run_fold(
         print(f"    [SKIP] {patient_id} / {model_key}: train has only one class")
         return None
 
-    model = create_model(model_key, args)
+    model = create_model(model_key, args, best_params)
 
     print(f"    Fitting {MODEL_DISPLAY_NAMES[model_key]} on {len(X_tr)} train windows...")
     model.fit(X_tr, y_tr)
@@ -527,6 +706,13 @@ def main() -> None:
     print(f"  Features cache : {cache_dir}")
     print(f"  Raw data dir   : {args.raw_dir}")
     print(f"  Window: {args.window_size} samples ({args.window_size // 100}s), overlap {args.window_overlap:.0%}")
+    if args.optuna_trials > 0:
+        timeout_str = f"{args.optuna_timeout}s" if args.optuna_timeout else "unlimited"
+        print(
+            f"  Optuna         : {args.optuna_trials} trials, {args.optuna_cv_folds}-fold CV, "
+            f"timeout={timeout_str}, MedianPruner(startup={args.optuna_startup_trials}, "
+            f"warmup={args.optuna_warmup_steps}), metric=F1-macro"
+        )
 
     # ----------------------------------------------------------------
     # Step 1: discover patients and extract (or load) tsfresh features
@@ -552,6 +738,51 @@ def main() -> None:
         patient_labels[patient_id]   = labs
 
     patients = [p for p in patients if p in patient_features]  # keep only valid ones
+
+    # ----------------------------------------------------------------
+    # Step 2: Optuna hyperparameter search (once, pre-LOSO loop)
+    # ----------------------------------------------------------------
+    best_params_per_model: Dict[str, dict] = {}
+    tunable_models = [m for m in models if m not in _NO_OPTUNA_MODELS]
+
+    if args.optuna_trials > 0 and tunable_models:
+        if not OPTUNA_AVAILABLE:
+            print("[WARN] optuna not installed — skipping hyperparameter search (pip install optuna)")
+        else:
+            print(f"\n{'=' * 60}")
+            print(f"  OPTUNA — {args.optuna_trials} trials, {args.optuna_cv_folds}-fold CV")
+            print("=" * 60)
+
+            # Combine all patients on their common feature columns
+            common_cols = list(patient_features[patients[0]].columns)
+            for p in patients[1:]:
+                common_cols = [c for c in common_cols if c in patient_features[p].columns]
+
+            X_all = pd.concat(
+                [patient_features[p][common_cols] for p in patients], axis=0
+            )
+            y_all = pd.concat([patient_labels[p] for p in patients], axis=0)
+            valid_mask = y_all.notna()
+            X_all_np = X_all[valid_mask].values.astype(np.float32)
+            y_all_np = y_all[valid_mask].values.astype(np.int64)
+
+            for model_key in tunable_models:
+                print(f"\n  Tuning {MODEL_DISPLAY_NAMES[model_key]}...")
+                best_params_per_model[model_key] = tune_hyperparams_optuna(
+                    model_key=model_key,
+                    X_all=X_all_np,
+                    y_all=y_all_np,
+                    n_trials=args.optuna_trials,
+                    cv_folds=args.optuna_cv_folds,
+                    k=args.k,
+                    random_state=args.random_state,
+                    timeout=args.optuna_timeout,
+                    n_startup_trials=args.optuna_startup_trials,
+                    n_warmup_steps=args.optuna_warmup_steps,
+                    show_progress_bar=True,
+                    save_visualizations=args.optuna_save_viz,
+                    output_dir=output_dir,
+                )
 
     # ----------------------------------------------------------------
     # Step 3: LOSO loop
@@ -605,6 +836,7 @@ def main() -> None:
                 y_test=y_test_clean,
                 model_key=model_key,
                 args=args,
+                best_params=best_params_per_model.get(model_key),
             )
 
             if result is not None:
@@ -646,7 +878,7 @@ def main() -> None:
         return
 
     csv_path = save_fold_metrics_csv(all_model_results, output_dir, args.append_csv)
-    print(f"\nRun 'python plot_loso_results.py --csv {csv_path}' to generate plots.")
+    print(f"\nRun 'python plot_loso_results.py --output-dir {output_dir}' to generate plots.")
 
     print("\n" + "=" * 60)
     print("  LOSO TABULAR COMPLETED")
