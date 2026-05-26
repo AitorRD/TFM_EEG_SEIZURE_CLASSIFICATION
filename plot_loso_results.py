@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
 # Metrics table
 # ---------------------------------------------------------------------------
 
-_ROC_EXCLUDE = {"chronos", "moirai", "tsmixer"}
+_ROC_EXCLUDE = {"chronos", "chronos2", "moirai", "moirai2", "tsmixer"}
 
 
 def plot_metrics_table(df: pd.DataFrame, output_dir: Path) -> None:
