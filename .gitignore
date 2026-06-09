@@ -40,6 +40,8 @@ pipeline.md
 /data/processed/optuna_results/*
 /data/processed/optuna_sample/*
 /data/processed/models/*
+/data/processed/dataset_clipped_30/*
+/data/processed/tsfresh_features/*
 
 /experimentation/images/results/csv/*
 /images/results/csv/*
