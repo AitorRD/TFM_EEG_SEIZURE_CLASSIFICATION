@@ -105,11 +105,45 @@ _NO_OPTUNA_MODELS = {"tabpfn", "tabicl"}
 # Metrics reported — same keys as loso_foundation.py
 METRIC_KEYS = ["Accuracy", "Precision", "Recall", "F1 Score", "F1 Macro", "F1 Micro", "ROC AUC"]
 
-EEG_CHANNELS = [
+SIENA_EEG_CHANNELS = [
     "EEG Fp1", "EEG Fp2", "EEG F7", "EEG F3", "EEG Fz", "EEG F4", "EEG F8",
     "EEG T3", "EEG C3", "EEG Cz", "EEG C4", "EEG T4", "EEG T5", "EEG P3",
     "EEG Pz", "EEG P4", "EEG T6", "EEG O1", "EEG O2",
 ]
+
+# CHB-MIT ships bipolar (double-banana) derivations instead of referential
+# "EEG <electrode>" channels, and the montage isn't identical across every
+# patient/session (e.g. chb12 switches to a CS2-referential montage midway,
+# some patients add P7-T7/T7-FT9/FT9-FT10/FT10-T8). MNE also renames the
+# duplicated "T8-P8" channel present in several files to "T8-P8-0"/"T8-P8-1".
+# This list is the standard 18-22 channel montage plus those duplicate-safe
+# aliases; the intersection filter below picks whichever subset is present.
+CHBMIT_EEG_CHANNELS = [
+    "FP1-F7", "F7-T7", "T7-P7", "P7-O1",
+    "FP1-F3", "F3-C3", "C3-P3", "P3-O1",
+    "FP2-F4", "F4-C4", "C4-P4", "P4-O2",
+    "FP2-F8", "F8-T8", "T8-P8", "P8-O2",
+    "FZ-CZ", "CZ-PZ",
+    "P7-T7", "T7-FT9", "FT9-FT10", "FT10-T8",
+    "T8-P8-0", "T8-P8-1",
+]
+
+DATASET_CONFIGS = {
+    "siena": {
+        "raw_dir": "data/raw/csv-data",
+        "eeg_channels": SIENA_EEG_CHANNELS,
+        "rename_cols": {"EEG CZ": "EEG Cz", "EEG FP2": "EEG Fp2"},
+    },
+    "chbmit": {
+        "raw_dir": "data/raw/csv-data-v2",
+        "eeg_channels": CHBMIT_EEG_CHANNELS,
+        "rename_cols": {},
+    },
+}
+
+# Overwritten in main() based on --dataset; module-level default keeps
+# behavior unchanged for anything importing this module directly.
+EEG_CHANNELS = SIENA_EEG_CHANNELS
 
 
 # ---------------------------------------------------------------------------
@@ -127,8 +161,13 @@ def parse_args() -> argparse.Namespace:
         choices=_all_models, default=_all_models,
     )
     p.add_argument(
-        "--raw-dir", type=str, default="data/raw/csv-data",
-        help="Root directory with per-patient clipped CSVs (PN_XX/*_clipped.csv)",
+        "--dataset", choices=["siena", "chbmit"], default="siena",
+        help="Which raw dataset layout/channel naming to use (sets --raw-dir and the EEG channel list)",
+    )
+    p.add_argument(
+        "--raw-dir", type=str, default=None,
+        help="Root directory with per-patient clipped CSVs. Defaults to the --dataset's "
+             "standard location (data/raw/csv-data for siena, data/raw/csv-data-v2 for chbmit)",
     )
     p.add_argument("--window-size", type=int, default=1000,
                    help="Samples per window (default 1000 = 10 s at 100 Hz)")
@@ -225,8 +264,20 @@ def load_and_window_patient(
     for csv_file in sorted(patient_dir.glob("*_clipped.csv")):
         try:
             d = pd.read_csv(csv_file)
-            if len(d) > 0:
-                dfs.append(d)
+            if len(d) == 0:
+                continue
+            # CHB-MIT montages aren't fixed per patient (e.g. chb12 switches
+            # to a CS2-referential montage partway through its recordings) —
+            # skip sessions that don't share enough of the expected EEG
+            # columns instead of silently windowing near-all-zero rows.
+            present = sum(1 for c in EEG_CHANNELS if c in d.columns)
+            if present < max(1, len(EEG_CHANNELS) // 2):
+                print(
+                    f"  [WARN] {csv_file.name}: only {present}/{len(EEG_CHANNELS)} "
+                    f"expected EEG channels present (montage mismatch?) — skipping"
+                )
+                continue
+            dfs.append(d)
         except Exception as e:
             print(f"  [WARN] {csv_file.name}: {e}")
 
@@ -690,6 +741,14 @@ def plot_loso_confusion_matrix(
 
 def main() -> None:
     args = parse_args()
+
+    global EEG_CHANNELS, _RENAME_COLS
+    dataset_cfg = DATASET_CONFIGS[args.dataset]
+    EEG_CHANNELS = dataset_cfg["eeg_channels"]
+    _RENAME_COLS = dataset_cfg["rename_cols"]
+    if args.raw_dir is None:
+        args.raw_dir = dataset_cfg["raw_dir"]
+
     output_dir = Path(args.output_dir)
     cache_dir  = Path(args.features_cache_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -701,6 +760,7 @@ def main() -> None:
     print("=" * 60)
     print("  LOSO — TSFRESH + TABULAR MODELS — EEG SEIZURE CLASSIFICATION")
     print("=" * 60)
+    print(f"  Dataset        : {args.dataset}")
     print(f"  Models         : {', '.join(MODEL_DISPLAY_NAMES[m] for m in models)}")
     print(f"  SelectKBest k  : {args.k}")
     print(f"  Features cache : {cache_dir}")

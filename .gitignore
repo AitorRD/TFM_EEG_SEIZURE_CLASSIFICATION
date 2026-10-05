@@ -51,3 +51,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.pyc
+
+*.parquet
+*.log
+/logs/*
+!/logs/.gitkeep
