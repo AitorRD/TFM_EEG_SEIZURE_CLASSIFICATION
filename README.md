@@ -1,6 +1,6 @@
 # EEG Seizure Classification
 
-End-to-end framework for epileptic seizure detection from scalp EEG signals. Built as a Master's Thesis (TFM) project, it covers the full pipeline from raw EDF recordings to trained ML/DL models with explainability (XAI).
+End-to-end framework for epileptic seizure detection from scalp EEG signals. It covers the full pipeline from raw EDF recordings to trained ML/DL models with explainability (XAI).
 
 ---
 
